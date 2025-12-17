@@ -145,7 +145,8 @@ static time_t find_block_start(time_t now) {
   const char *home = getenv("HOME");
   if (!home) return 0;
   char path[PATH_MAX_LEN];
-  snprintf(path, sizeof(path), "%s/.claude/projects", home);
+  int n = snprintf(path, sizeof(path), "%s/.claude/projects", home);
+  if (n < 0 || (size_t)n >= sizeof(path)) return 0;
   DIR *pd = opendir(path);
   if (!pd) return 0;
 
@@ -157,7 +158,8 @@ static time_t find_block_start(time_t now) {
   while ((pe = readdir(pd))) {
     if (pe->d_name[0] == '.') continue;
     char ppath[PATH_MAX_LEN];
-    snprintf(ppath, sizeof(ppath), "%s/%s", path, pe->d_name);
+    n = snprintf(ppath, sizeof(ppath), "%s/%s", path, pe->d_name);
+    if (n < 0 || (size_t)n >= sizeof(ppath)) continue;
     DIR *sd = opendir(ppath);
     if (!sd) continue;
     struct dirent *se;
@@ -166,7 +168,8 @@ static time_t find_block_start(time_t now) {
       size_t len = strlen(se->d_name);
       if (len < JSONL_EXT_LEN + 1 || strcmp(se->d_name + len - JSONL_EXT_LEN, JSONL_EXT)) continue;
       char fpath[PATH_MAX_LEN];
-      snprintf(fpath, sizeof(fpath), "%s/%s", ppath, se->d_name);
+      n = snprintf(fpath, sizeof(fpath), "%s/%s", ppath, se->d_name);
+      if (n < 0 || (size_t)n >= sizeof(fpath)) continue;
       struct stat st;
       if (stat(fpath, &st) || st.st_mtime < cutoff) continue;
       FILE *f = fopen(fpath, "r");
@@ -252,7 +255,8 @@ static int find_git(char *out, size_t sz) {
   char cwd[PATH_MAX_LEN];
   if (!getcwd(cwd, sizeof(cwd))) return 0;
   while (*cwd) {
-    snprintf(out, sz, "%s/.git", cwd);
+    int n = snprintf(out, sz, "%s/.git", cwd);
+    if (n < 0 || (size_t)n >= sz) return 0;
     struct stat st;
     if (stat(out, &st) == 0) return 1;
     char *p = strrchr(cwd, '/');
@@ -267,12 +271,14 @@ static int find_git(char *out, size_t sz) {
 // May have false negatives for changes in other directories.
 static int git_dirty(const char *gd) {
   char path[PATH_MAX_LEN];
-  snprintf(path, sizeof(path), "%s/index", gd);
+  int n = snprintf(path, sizeof(path), "%s/index", gd);
+  if (n < 0 || (size_t)n >= sizeof(path)) return 0;
   struct stat idx;
   if (stat(path, &idx)) return 0;
   const char *checks[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"};
   for (size_t i = 0; i < sizeof(checks)/sizeof(checks[0]); i++) {
-    snprintf(path, sizeof(path), "%s/%s", gd, checks[i]);
+    n = snprintf(path, sizeof(path), "%s/%s", gd, checks[i]);
+    if (n < 0 || (size_t)n >= sizeof(path)) continue;
     if (access(path, F_OK) == 0) return 1;
   }
   char wt[PATH_MAX_LEN];
@@ -282,7 +288,8 @@ static int git_dirty(const char *gd) {
   if (p) *p = '\0';
   const char *dirs[] = {".", "src", "lib", "cmd", "pkg", "internal", "test", "tests", "bin", "scripts"};
   for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); i++) {
-    snprintf(path, sizeof(path), "%s/%s", wt, dirs[i]);
+    n = snprintf(path, sizeof(path), "%s/%s", wt, dirs[i]);
+    if (n < 0 || (size_t)n >= sizeof(path)) continue;
     struct stat st;
     if (stat(path, &st) == 0 && st.st_mtime > idx.st_mtime) return 1;
   }
@@ -293,7 +300,8 @@ static void pr_git(void) {
   char gd[PATH_MAX_LEN];
   if (!find_git(gd, sizeof(gd))) return;
   char hp[PATH_MAX_LEN];
-  snprintf(hp, sizeof(hp), "%s/HEAD", gd);
+  int n = snprintf(hp, sizeof(hp), "%s/HEAD", gd);
+  if (n < 0 || (size_t)n >= sizeof(hp)) return;
   FILE *f = fopen(hp, "r");
   if (!f) return;
   char head[256];
