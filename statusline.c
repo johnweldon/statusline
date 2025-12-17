@@ -56,7 +56,7 @@ static int g_shlvl = 0;
 
 static void color(const char *c) {
   if (g_no_color) return;
-  if (g_fmt == FMT_PS1) printf("\\[%s\\]", c);
+  if (g_fmt == FMT_PS1) printf("\001%s\002", c);
   else printf("%s", c);
 }
 

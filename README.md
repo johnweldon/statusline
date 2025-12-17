@@ -12,9 +12,9 @@ make install-claude # ~/.claude/statusline
 
 ## Usage
 
-**Bash mode** (use `bashline` symlink for automatic `--ps1`):
+**Bash mode** (use `bashline` symlink for automatic `--bash --ps1`):
 ```bash
-bashline --exit-code=$? --jobs=$(jobs -p | wc -l)
+bashline --exit-code=$? --shlvl=$SHLVL --jobs=N
 ```
 
 **Claude mode** (reads JSON from stdin):
@@ -35,17 +35,18 @@ echo '{"display_name":"opus"}' | statusline
 
 ## Bash Integration
 
-Replace `~/.bash_prompt`:
+Add to `~/.bashrc` or `~/.bash_prompt`:
 
 ```bash
-set_bash_prompt() {
-  local ec=$?
-  PS1="$(bashline --exit-code=$ec --jobs=$(jobs -p 2>/dev/null | wc -l | tr -d ' '))"
-}
-PROMPT_COMMAND=set_bash_prompt
+if command -v bashline >/dev/null 2>&1; then
+  set_bash_prompt() {
+    PS1='$(bashline --ps1 --exit-code=$? --shlvl=$SHLVL --jobs=\j)'
+  }
+  PROMPT_COMMAND=set_bash_prompt
+fi
 ```
 
-The `--ps1` flag wraps ANSI codes in `\[...\]` for correct cursor positioning.
+The `--ps1` flag outputs raw control characters (SOH/STX) for correct cursor positioning when used in command substitution. The `\j` is a bash PS1 escape that expands to the job count.
 
 ## Claude Code Integration
 
