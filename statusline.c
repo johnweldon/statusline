@@ -198,7 +198,7 @@ static void pr_claude_info(void) {
   long win = json_long(g_input, "context_window_size");
 
   color(MAG); printf("[%s]", model); color(RST); printf(" ");
-  if (in >= 0 && win > 0) {
+  if (in >= 0) {
     // Safe addition with overflow check before each operation
     long cur = in;
     if (cw > 0) {
@@ -209,9 +209,14 @@ static void pr_claude_info(void) {
       if (cur > LONG_MAX - cr) cur = LONG_MAX;
       else cur += cr;
     }
-    long pct = (cur >= win) ? 100 : (win >= 100 ? cur / (win / 100) : cur * 100 / win);
-    color(BLU); printf("%ld%%", pct); color(RST); printf(" ");
-    color(DIM_BLU); printf("(%ld/%ld)", cur, win); color(RST); printf(" ");
+    if (win > 0) {
+      long pct = (cur >= win) ? 100 : (win >= 100 ? cur / (win / 100) : cur * 100 / win);
+      color(BLU); printf("%ld%%", pct); color(RST); printf(" ");
+      color(DIM_BLU); printf("(%ld/%ld)", cur, win); color(RST); printf(" ");
+    } else {
+      // Show token count even without context window size
+      color(DIM_BLU); printf("(%ld)", cur); color(RST); printf(" ");
+    }
     if (cr > 0 || cw > 0) {
       color(CYN); printf("[cache: r:%ld w:%ld]", cr > 0 ? cr : 0, cw > 0 ? cw : 0);
       color(RST); printf(" ");
