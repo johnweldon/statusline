@@ -1,6 +1,9 @@
 // statusline - Fast status line generator for bash and Claude Code
 // Usage: statusline [--bash|--claude] [--ps1] [--exit-code=N] [--jobs=N]
 #define _GNU_SOURCE
+#ifndef VERSION
+#define VERSION "unknown"
+#endif
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -523,6 +526,7 @@ static void usage(const char *prog) {
   fprintf(stderr, "  --exit-code=N  Last exit code\n");
   fprintf(stderr, "  --jobs=N       Background jobs\n");
   fprintf(stderr, "  --shlvl=N      Shell level\n");
+  fprintf(stderr, "  --version      Show version\n");
 }
 
 static void parse_args(int argc, char **argv) {
@@ -544,6 +548,7 @@ static void parse_args(int argc, char **argv) {
     else if (strncmp(argv[i], "--jobs=", 7) == 0) g_jobs = parse_int(argv[i] + 7);
     else if (strncmp(argv[i], "--shlvl=", 8) == 0) g_shlvl = parse_int(argv[i] + 8);
     else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { usage(argv[0]); exit(0); }
+    else if (strcmp(argv[i], "-V") == 0 || strcmp(argv[i], "--version") == 0) { printf("statusline %s\n", VERSION); exit(0); }
   }
 }
 
