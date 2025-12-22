@@ -17,7 +17,7 @@
 #define CACHE_TTL_SECS  60
 #define BUF_SIZE        65536
 #define PATH_MAX_LEN    4096
-#define MAX_FILES_CHECK 50
+#define MAX_FILES_CHECK 200
 
 #define JSONL_EXT       ".jsonl"
 #define JSONL_EXT_LEN   6
@@ -30,6 +30,18 @@ typedef struct {
   time_t start;
   long tokens;
 } block_info_t;
+
+typedef struct {
+  char path[PATH_MAX_LEN];
+  time_t mtime;
+} file_entry_t;
+
+static int cmp_file_mtime_desc(const void *a, const void *b) {
+  const file_entry_t *fa = a, *fb = b;
+  if (fb->mtime > fa->mtime) return 1;
+  if (fb->mtime < fa->mtime) return -1;
+  return 0;
+}
 
 enum { MODE_CLAUDE, MODE_BASH };
 enum { FMT_RAW, FMT_PS1 };
@@ -184,6 +196,7 @@ static long extract_tokens(const char *line) {
 }
 
 // Claude: find block start and count tokens
+// Collects JSONL files, sorts by mtime descending (newest first), then processes
 static block_info_t find_block_info(time_t now) {
   block_info_t info = {0, 0};
   const char *home = getenv("HOME");
@@ -194,9 +207,12 @@ static block_info_t find_block_info(time_t now) {
   if (!pd) return info;
 
   time_t cutoff = now - BLOCK_HOURS * 3600;
-  int checked = 0;
+  file_entry_t *files = malloc(MAX_FILES_CHECK * sizeof(file_entry_t));
+  if (!files) { closedir(pd); return info; }
+  int nfiles = 0;
   struct dirent *pe;
 
+  // Phase 1: Collect all eligible JSONL files
   while ((pe = readdir(pd))) {
     if (pe->d_name[0] == '.') continue;
     char ppath[PATH_MAX_LEN];
@@ -204,46 +220,55 @@ static block_info_t find_block_info(time_t now) {
     DIR *sd = opendir(ppath);
     if (!sd) continue;
     struct dirent *se;
-    while ((se = readdir(sd))) {
-      if (checked >= MAX_FILES_CHECK) break;
+    while ((se = readdir(sd)) && nfiles < MAX_FILES_CHECK) {
       size_t len = strlen(se->d_name);
       if (len < JSONL_EXT_LEN + 1 || strcmp(se->d_name + len - JSONL_EXT_LEN, JSONL_EXT)) continue;
       char fpath[PATH_MAX_LEN];
       if (!pathcat(fpath, sizeof(fpath), ppath, se->d_name)) continue;
       struct stat st;
       if (stat(fpath, &st) || !S_ISREG(st.st_mode) || st.st_mtime < cutoff) continue;
-      FILE *f = fopen(fpath, "r");
-      if (!f) continue;
-      checked++;
-      char line[8192], ts[64], msg_id[64], last_msg_id[64] = "";
-      int found_start = 0;
-      time_t line_ts = 0;
-      while (fgets(line, sizeof(line), f)) {
-        // Extract timestamp
-        if (extract_quoted(line, TS_PREFIX, ts, sizeof(ts))) {
-          line_ts = parse_iso(ts);
-          if (!found_start && line_ts >= cutoff && line_ts <= now) {
-            if (!info.start || line_ts < info.start) info.start = line_ts;
-            found_start = 1;
-          }
-        }
-        // Count tokens for messages in block, dedupe by message ID
-        if (line_ts >= cutoff && line_ts <= now && strstr(line, USAGE_PREFIX)) {
-          if (extract_quoted(line, "\"id\":\"", msg_id, sizeof(msg_id)) &&
-              strcmp(msg_id, last_msg_id) != 0) {
-            long tokens = extract_tokens(line);
-            if (tokens > 0 && info.tokens <= LONG_MAX - tokens)
-              info.tokens += tokens;
-            snprintf(last_msg_id, sizeof(last_msg_id), "%s", msg_id);
-          }
-        }
-      }
-      fclose(f);
+      snprintf(files[nfiles].path, sizeof(files[nfiles].path), "%s", fpath);
+      files[nfiles].mtime = st.st_mtime;
+      nfiles++;
     }
     closedir(sd);
-    if (checked >= MAX_FILES_CHECK) break;
   }
   closedir(pd);
+
+  // Phase 2: Sort by mtime descending (newest first)
+  if (nfiles > 1)
+    qsort(files, (size_t)nfiles, sizeof(file_entry_t), cmp_file_mtime_desc);
+
+  // Phase 3: Process files in sorted order
+  for (int i = 0; i < nfiles; i++) {
+    FILE *f = fopen(files[i].path, "r");
+    if (!f) continue;
+    char line[8192], ts[64], msg_id[64], last_msg_id[64] = "";
+    int found_start = 0;
+    time_t line_ts = 0;
+    while (fgets(line, sizeof(line), f)) {
+      // Extract timestamp
+      if (extract_quoted(line, TS_PREFIX, ts, sizeof(ts))) {
+        line_ts = parse_iso(ts);
+        if (!found_start && line_ts >= cutoff && line_ts <= now) {
+          if (!info.start || line_ts < info.start) info.start = line_ts;
+          found_start = 1;
+        }
+      }
+      // Count tokens for messages in block, dedupe by message ID
+      if (line_ts >= cutoff && line_ts <= now && strstr(line, USAGE_PREFIX)) {
+        if (extract_quoted(line, "\"id\":\"", msg_id, sizeof(msg_id)) &&
+            strcmp(msg_id, last_msg_id) != 0) {
+          long tokens = extract_tokens(line);
+          if (tokens > 0 && info.tokens <= LONG_MAX - tokens)
+            info.tokens += tokens;
+          snprintf(last_msg_id, sizeof(last_msg_id), "%s", msg_id);
+        }
+      }
+    }
+    fclose(f);
+  }
+  free(files);
   if (info.start) info.start -= info.start % 3600; // Round to hour
   return info;
 }
@@ -265,14 +290,15 @@ static void pr_block_time(void) {
     FILE *c = fdopen(fd, "r+");
     if (c) {
       time_t ct;
-      if (fscanf(c, "%ld:%ld:%ld", &ct, &info.start, &info.tokens) == 3 &&
-          ct <= now && now - ct < CACHE_TTL_SECS && info.start > 0) {
+      char ver[4] = "";
+      if (fscanf(c, "%3[^:]:%ld:%ld:%ld", ver, &ct, &info.start, &info.tokens) == 4 &&
+          strcmp(ver, "v1") == 0 && ct <= now && now - ct < CACHE_TTL_SECS && info.start > 0) {
         // Use cached values
       } else {
         info = find_block_info(now);
         rewind(c);
         if (ftruncate(fd, 0) == 0) {
-          fprintf(c, "%ld:%ld:%ld", now, info.start, info.tokens);
+          fprintf(c, "v1:%ld:%ld:%ld", now, info.start, info.tokens);
           fflush(c);
         }
       }
@@ -334,7 +360,12 @@ static int find_git(char *out, size_t sz) {
   return 0;
 }
 
-// Heuristic dirty detection - checks common directories only
+// Heuristic dirty detection - compares .git/index mtime against common directories.
+// Trade-offs vs `git status`:
+// - Speed: O(1) stat calls vs O(n) file scanning
+// - False positives: Directory mtime changes on read access, not just writes
+// - False negatives: Modified files in unchecked directories won't be detected
+// Checked directories: . src lib cmd pkg internal test tests bin scripts
 static int git_dirty(const char *gd) {
   char path[PATH_MAX_LEN];
   if (!pathcat(path, sizeof(path), gd, "index")) return 0;
@@ -537,5 +568,6 @@ int main(int argc, char **argv) {
     pr_shlvl();
     printf("\n"); pr_prompt();
   }
+  fflush(stdout);
   return 0;
 }
