@@ -255,8 +255,7 @@ static int msg_id_seen(msg_id_set_t *set, const char *id) {
     unsigned slot = (idx + i) % MSG_ID_HASH_SIZE;
     if (!set->ids[slot][0]) {
       // Empty slot - not seen, add it
-      strncpy(set->ids[slot], id, 63);
-      set->ids[slot][63] = '\0';
+      snprintf(set->ids[slot], sizeof(set->ids[slot]), "%s", id);
       set->count++;
       return 0;
     }
