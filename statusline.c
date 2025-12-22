@@ -22,9 +22,14 @@
 #define JSONL_EXT       ".jsonl"
 #define JSONL_EXT_LEN   6
 #define TS_PREFIX       "\"timestamp\":\""
-#define TS_PREFIX_LEN   13
+#define USAGE_PREFIX    "\"usage\":{"
 #define GIT_REF_PREFIX  "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
+
+typedef struct {
+  time_t start;
+  long tokens;
+} block_info_t;
 
 enum { MODE_CLAUDE, MODE_BASH };
 enum { FMT_RAW, FMT_PS1 };
@@ -58,6 +63,26 @@ static void color(const char *c) {
   if (g_no_color) return;
   if (g_fmt == FMT_PS1) printf("\001%s\002", c);
   else printf("%s", c);
+}
+
+// Safe path construction - returns 1 on success
+static int pathcat(char *out, size_t sz, const char *a, const char *b) {
+  int n = snprintf(out, sz, "%s/%s", a, b);
+  return n >= 0 && (size_t)n < sz;
+}
+
+// Extract quoted value after prefix into out, returns length or 0
+static size_t extract_quoted(const char *s, const char *prefix, char *out, size_t sz) {
+  char *p = strstr(s, prefix);
+  if (!p) return 0;
+  p += strlen(prefix);
+  char *q = strchr(p, '"');
+  if (!q || q <= p) return 0;
+  size_t len = (size_t)(q - p);
+  if (len >= sz) return 0;
+  memcpy(out, p, len);
+  out[len] = '\0';
+  return len;
 }
 
 // JSON helpers
@@ -130,6 +155,7 @@ static void pr_claude_info(void) {
   color(MAG); printf("[%s]", model); color(RST); printf(" ");
   if (in >= 0 && win > 0) {
     long cur = in + (cw > 0 ? cw : 0) + (cr > 0 ? cr : 0);
+    if (cur < 0) cur = LONG_MAX; // Overflow protection
     long pct = (cur >= win) ? 100 : (win >= 100 ? cur / (win / 100) : cur * 100 / win);
     color(BLU); printf("%ld%%", pct); color(RST); printf(" ");
     color(DIM_BLU); printf("(%ld/%ld)", cur, win); color(RST); printf(" ");
@@ -140,26 +166,41 @@ static void pr_claude_info(void) {
   }
 }
 
-// Claude: 5-hour block time remaining
-static time_t find_block_start(time_t now) {
+// Extract token counts from usage JSON
+static long extract_tokens(const char *line) {
+  char *u = strstr(line, USAGE_PREFIX);
+  if (!u) return 0;
+  long total = 0;
+  // Parse input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+  const char *keys[] = {"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"};
+  for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
+    long v = json_long(u, keys[i]);
+    if (v > 0) {
+      if (total > LONG_MAX - v) return LONG_MAX; // Saturate on overflow
+      total += v;
+    }
+  }
+  return total;
+}
+
+// Claude: find block start and count tokens
+static block_info_t find_block_info(time_t now) {
+  block_info_t info = {0, 0};
   const char *home = getenv("HOME");
-  if (!home) return 0;
+  if (!home) return info;
   char path[PATH_MAX_LEN];
-  int n = snprintf(path, sizeof(path), "%s/.claude/projects", home);
-  if (n < 0 || (size_t)n >= sizeof(path)) return 0;
+  if (snprintf(path, sizeof(path), "%s/.claude/projects", home) < 0) return info;
   DIR *pd = opendir(path);
-  if (!pd) return 0;
+  if (!pd) return info;
 
   time_t cutoff = now - BLOCK_HOURS * 3600;
-  time_t start = 0;
   int checked = 0;
   struct dirent *pe;
 
   while ((pe = readdir(pd))) {
     if (pe->d_name[0] == '.') continue;
     char ppath[PATH_MAX_LEN];
-    n = snprintf(ppath, sizeof(ppath), "%s/%s", path, pe->d_name);
-    if (n < 0 || (size_t)n >= sizeof(ppath)) continue;
+    if (!pathcat(ppath, sizeof(ppath), path, pe->d_name)) continue;
     DIR *sd = opendir(ppath);
     if (!sd) continue;
     struct dirent *se;
@@ -168,25 +209,34 @@ static time_t find_block_start(time_t now) {
       size_t len = strlen(se->d_name);
       if (len < JSONL_EXT_LEN + 1 || strcmp(se->d_name + len - JSONL_EXT_LEN, JSONL_EXT)) continue;
       char fpath[PATH_MAX_LEN];
-      n = snprintf(fpath, sizeof(fpath), "%s/%s", ppath, se->d_name);
-      if (n < 0 || (size_t)n >= sizeof(fpath)) continue;
+      if (!pathcat(fpath, sizeof(fpath), ppath, se->d_name)) continue;
       struct stat st;
-      if (stat(fpath, &st) || st.st_mtime < cutoff) continue;
+      if (stat(fpath, &st) || !S_ISREG(st.st_mode) || st.st_mtime < cutoff) continue;
       FILE *f = fopen(fpath, "r");
       if (!f) continue;
       checked++;
-      char line[8192];
+      char line[8192], ts[64], msg_id[64], last_msg_id[64] = "";
+      int found_start = 0;
+      time_t line_ts = 0;
       while (fgets(line, sizeof(line), f)) {
-        char *p = strstr(line, TS_PREFIX);
-        if (!p) continue;
-        p += TS_PREFIX_LEN;
-        char *q = strchr(p, '"');
-        if (!q || q - p >= 64) break;
-        char ts[64];
-        memcpy(ts, p, q - p); ts[q - p] = '\0';
-        time_t t = parse_iso(ts);
-        if (t >= cutoff && t <= now && (!start || t < start)) start = t;
-        break;
+        // Extract timestamp
+        if (extract_quoted(line, TS_PREFIX, ts, sizeof(ts))) {
+          line_ts = parse_iso(ts);
+          if (!found_start && line_ts >= cutoff && line_ts <= now) {
+            if (!info.start || line_ts < info.start) info.start = line_ts;
+            found_start = 1;
+          }
+        }
+        // Count tokens for messages in block, dedupe by message ID
+        if (line_ts >= cutoff && line_ts <= now && strstr(line, USAGE_PREFIX)) {
+          if (extract_quoted(line, "\"id\":\"", msg_id, sizeof(msg_id)) &&
+              strcmp(msg_id, last_msg_id) != 0) {
+            long tokens = extract_tokens(line);
+            if (tokens > 0 && info.tokens <= LONG_MAX - tokens)
+              info.tokens += tokens;
+            snprintf(last_msg_id, sizeof(last_msg_id), "%s", msg_id);
+          }
+        }
       }
       fclose(f);
     }
@@ -194,39 +244,58 @@ static time_t find_block_start(time_t now) {
     if (checked >= MAX_FILES_CHECK) break;
   }
   closedir(pd);
-  return start;
+  if (info.start) info.start -= info.start % 3600; // Round to hour
+  return info;
+}
+
+// Format large numbers with K/M suffix
+static void print_tokens(long tokens) {
+  if (tokens >= 1000000) printf("%.1fM", tokens / 1000000.0);
+  else if (tokens >= 1000) printf("%.0fK", tokens / 1000.0);
+  else printf("%ld", tokens);
 }
 
 static void pr_block_time(void) {
   if (g_mode != MODE_CLAUDE) return;
-  time_t now = time(NULL), start = 0;
+  time_t now = time(NULL);
+  block_info_t info = {0, 0};
 
-  int fd = open(g_cache_path, O_RDWR | O_CREAT, 0600);
-  if (fd >= 0) {
-    flock(fd, LOCK_EX);
+  int fd = open(g_cache_path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
+  if (fd >= 0 && flock(fd, LOCK_EX) == 0) {
     FILE *c = fdopen(fd, "r+");
     if (c) {
-      time_t ct, cs;
-      if (fscanf(c, "%ld:%ld", &ct, &cs) == 2 && now - ct < CACHE_TTL_SECS && cs > 0) {
-        start = cs;
+      time_t ct;
+      if (fscanf(c, "%ld:%ld:%ld", &ct, &info.start, &info.tokens) == 3 &&
+          ct <= now && now - ct < CACHE_TTL_SECS && info.start > 0) {
+        // Use cached values
       } else {
-        start = find_block_start(now);
+        info = find_block_info(now);
         rewind(c);
-        if (ftruncate(fd, 0) == 0)
-          fprintf(c, "%ld:%ld", now, start);
+        if (ftruncate(fd, 0) == 0) {
+          fprintf(c, "%ld:%ld:%ld", now, info.start, info.tokens);
+          fflush(c);
+        }
       }
       fclose(c);
     } else {
+      flock(fd, LOCK_UN);
       close(fd);
     }
+  } else if (fd >= 0) {
+    close(fd); // flock failed
   }
-  if (!start) return;
-  long secs = start + BLOCK_HOURS * 3600 - now;
+  if (!info.start) return;
+  long secs = info.start + BLOCK_HOURS * 3600 - now;
   if (secs <= 0) return;
   int h = secs / 3600, m = (secs % 3600) / 60;
   color(YEL);
-  if (h > 0) printf("[%dh %dm left]", h, m);
-  else printf("[%dm left]", m);
+  if (h > 0) printf("[%dh %dm", h, m);
+  else printf("[%dm", m);
+  if (info.tokens > 0) {
+    printf(" ");
+    print_tokens(info.tokens);
+  }
+  printf("]");
   color(RST); printf(" ");
 }
 
@@ -255,8 +324,7 @@ static int find_git(char *out, size_t sz) {
   char cwd[PATH_MAX_LEN];
   if (!getcwd(cwd, sizeof(cwd))) return 0;
   while (*cwd) {
-    int n = snprintf(out, sz, "%s/.git", cwd);
-    if (n < 0 || (size_t)n >= sz) return 0;
+    if (!pathcat(out, sz, cwd, ".git")) return 0;
     struct stat st;
     if (stat(out, &st) == 0) return 1;
     char *p = strrchr(cwd, '/');
@@ -266,32 +334,27 @@ static int find_git(char *out, size_t sz) {
   return 0;
 }
 
-// Heuristic dirty detection - checks common directories only.
-// This avoids spawning 'git status' for performance.
-// May have false negatives for changes in other directories.
+// Heuristic dirty detection - checks common directories only
 static int git_dirty(const char *gd) {
   char path[PATH_MAX_LEN];
-  int n = snprintf(path, sizeof(path), "%s/index", gd);
-  if (n < 0 || (size_t)n >= sizeof(path)) return 0;
+  if (!pathcat(path, sizeof(path), gd, "index")) return 0;
   struct stat idx;
   if (stat(path, &idx)) return 0;
   const char *checks[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"};
   for (size_t i = 0; i < sizeof(checks)/sizeof(checks[0]); i++) {
-    n = snprintf(path, sizeof(path), "%s/%s", gd, checks[i]);
-    if (n < 0 || (size_t)n >= sizeof(path)) continue;
-    if (access(path, F_OK) == 0) return 1;
+    if (pathcat(path, sizeof(path), gd, checks[i]) && access(path, F_OK) == 0)
+      return 1;
   }
   char wt[PATH_MAX_LEN];
-  strncpy(wt, gd, sizeof(wt) - 1);
-  wt[sizeof(wt) - 1] = '\0';
+  snprintf(wt, sizeof(wt), "%s", gd);
   char *p = strrchr(wt, '/');
   if (p) *p = '\0';
   const char *dirs[] = {".", "src", "lib", "cmd", "pkg", "internal", "test", "tests", "bin", "scripts"};
   for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); i++) {
-    n = snprintf(path, sizeof(path), "%s/%s", wt, dirs[i]);
-    if (n < 0 || (size_t)n >= sizeof(path)) continue;
     struct stat st;
-    if (stat(path, &st) == 0 && st.st_mtime > idx.st_mtime) return 1;
+    if (pathcat(path, sizeof(path), wt, dirs[i]) &&
+        stat(path, &st) == 0 && st.st_mtime > idx.st_mtime)
+      return 1;
   }
   return 0;
 }
@@ -300,8 +363,7 @@ static void pr_git(void) {
   char gd[PATH_MAX_LEN];
   if (!find_git(gd, sizeof(gd))) return;
   char hp[PATH_MAX_LEN];
-  int n = snprintf(hp, sizeof(hp), "%s/HEAD", gd);
-  if (n < 0 || (size_t)n >= sizeof(hp)) return;
+  if (!pathcat(hp, sizeof(hp), gd, "HEAD")) return;
   FILE *f = fopen(hp, "r");
   if (!f) return;
   char head[256];
