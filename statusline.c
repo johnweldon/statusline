@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pwd.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -534,13 +535,36 @@ static void pr_shlvl(void) {
 }
 
 // Git
-static int find_git(char *out, size_t sz) {
+static int find_git(char *gitdir, char *worktree, size_t sz) {
   char cwd[PATH_MAX_LEN];
   if (!getcwd(cwd, sizeof(cwd))) return 0;
   while (*cwd) {
-    if (!pathcat(out, sz, cwd, ".git")) return 0;
+    char dotgit[PATH_MAX_LEN];
+    if (!pathcat(dotgit, sizeof(dotgit), cwd, ".git")) return 0;
     struct stat st;
-    if (stat(out, &st) == 0) return 1;
+    if (stat(dotgit, &st) == 0) {
+      if (S_ISDIR(st.st_mode)) {
+        snprintf(gitdir, sz, "%s", dotgit);
+        snprintf(worktree, sz, "%s", cwd);
+        return 1;
+      }
+      if (S_ISREG(st.st_mode)) {
+        FILE *f = fopen(dotgit, "r");
+        if (!f) return 0;
+        char line[PATH_MAX_LEN];
+        if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
+        fclose(f);
+        line[strcspn(line, "\n\r")] = '\0';
+        if (strncmp(line, "gitdir: ", 8) != 0) return 0;
+        const char *gd = line + 8;
+        if (gd[0] == '/')
+          snprintf(gitdir, sz, "%s", gd);
+        else
+          snprintf(gitdir, sz, "%s/%s", cwd, gd);
+        snprintf(worktree, sz, "%s", cwd);
+        return 1;
+      }
+    }
     char *p = strrchr(cwd, '/');
     if (!p || p == cwd) break;
     *p = '\0';
@@ -548,39 +572,141 @@ static int find_git(char *out, size_t sz) {
   return 0;
 }
 
-// Heuristic dirty detection - compares .git/index mtime against common directories.
-// Trade-offs vs `git status`:
-// - Speed: O(1) stat calls vs O(n) file scanning
-// - False positives: Directory mtime changes on read access, not just writes
-// - False negatives: Modified files in unchecked directories won't be detected
-// Checked directories: . src lib cmd pkg internal test tests bin scripts
-static int git_dirty(const char *gd) {
+static uint32_t read_be32(const unsigned char *p) {
+  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+         ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+// Dirty detection by parsing git index binary and comparing stat data.
+// Phase 1: Check for in-progress operations (merge, rebase, etc.)
+// Phase 2: Parse index entries, lstat each file, compare mtime/size/mode
+// Phase 3: Detect staged-but-uncommitted changes via index vs ref mtime
+#define GIT_INDEX_MAX_ENTRIES 2000
+
+static int git_dirty(const char *gitdir, const char *worktree) {
   char path[PATH_MAX_LEN];
-  if (!pathcat(path, sizeof(path), gd, "index")) return 0;
-  struct stat idx;
-  if (stat(path, &idx)) return 0;
-  const char *checks[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"};
-  for (size_t i = 0; i < sizeof(checks)/sizeof(checks[0]); i++) {
-    if (pathcat(path, sizeof(path), gd, checks[i]) && access(path, F_OK) == 0)
+
+  // Phase 1: Check for in-progress operations
+  const char *ops[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                       "REBASE_HEAD", "BISECT_LOG"};
+  for (size_t i = 0; i < sizeof(ops)/sizeof(ops[0]); i++) {
+    if (pathcat(path, sizeof(path), gitdir, ops[i]) && access(path, F_OK) == 0)
       return 1;
   }
-  char wt[PATH_MAX_LEN];
-  snprintf(wt, sizeof(wt), "%s", gd);
-  char *p = strrchr(wt, '/');
-  if (p) *p = '\0';
-  const char *dirs[] = {".", "src", "lib", "cmd", "pkg", "internal", "test", "tests", "bin", "scripts"};
-  for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); i++) {
+
+  // Phase 2: Parse git index and compare against filesystem
+  if (!pathcat(path, sizeof(path), gitdir, "index")) return 0;
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) return 0;
+
+  struct stat idx_st;
+  if (fstat(fd, &idx_st) != 0) { close(fd); return 0; }
+
+  unsigned char hdr[12];
+  if (read(fd, hdr, 12) != 12) { close(fd); return 0; }
+  if (memcmp(hdr, "DIRC", 4) != 0) { close(fd); return 0; }
+  uint32_t version = read_be32(hdr + 4);
+  if (version < 2 || version > 3) { close(fd); return 0; }
+  uint32_t nentries = read_be32(hdr + 8);
+  if (nentries > GIT_INDEX_MAX_ENTRIES) nentries = GIT_INDEX_MAX_ENTRIES;
+
+  size_t datasz = (size_t)(idx_st.st_size - 12);
+  if (datasz > 4 * 1024 * 1024) { close(fd); return 0; }
+  unsigned char *data = malloc(datasz);
+  if (!data) { close(fd); return 0; }
+  if (read(fd, data, datasz) != (ssize_t)datasz) { free(data); close(fd); return 0; }
+  close(fd);
+
+  int dirty = 0;
+  size_t pos = 0;
+
+  for (uint32_t i = 0; i < nentries && !dirty; i++) {
+    if (pos + 62 > datasz) break;
+    const unsigned char *e = data + pos;
+    uint32_t stored_mtime = read_be32(e + 8);
+    uint32_t stored_mode = read_be32(e + 24);
+    uint32_t stored_size = read_be32(e + 36);
+    uint16_t flags = ((uint16_t)e[60] << 8) | e[61];
+
+    size_t name_off = 62;
+    if (version >= 3 && (flags & 0x4000))
+      name_off = 64;
+    if (pos + name_off >= datasz) break;
+
+    uint16_t flaglen = flags & 0x0FFF;
+    size_t namelen;
+    if (flaglen < 0x0FFF) {
+      namelen = flaglen;
+    } else {
+      const unsigned char *nul = memchr(e + name_off, 0, datasz - pos - name_off);
+      if (!nul) break;
+      namelen = (size_t)(nul - (e + name_off));
+    }
+
+    size_t entry_size = (name_off + namelen + 8) & ~(size_t)7;
+
+    char fpath[PATH_MAX_LEN];
+    int n = snprintf(fpath, sizeof(fpath), "%s/%.*s",
+                     worktree, (int)namelen, (const char *)(e + name_off));
+    if (n < 0 || (size_t)n >= sizeof(fpath)) { pos += entry_size; continue; }
+
     struct stat st;
-    if (pathcat(path, sizeof(path), wt, dirs[i]) &&
-        stat(path, &st) == 0 && st.st_mtime > idx.st_mtime)
-      return 1;
+    if (lstat(fpath, &st) != 0) {
+      dirty = 1;
+    } else {
+      if (st.st_mtime != (time_t)stored_mtime)
+        dirty = 1;
+      else if (S_ISREG(st.st_mode) && st.st_size != (off_t)stored_size)
+        dirty = 1;
+      else {
+        int idx_exec = (stored_mode & 0111) != 0;
+        int fs_exec = (st.st_mode & 0111) != 0;
+        if (idx_exec != fs_exec)
+          dirty = 1;
+      }
+    }
+    pos += entry_size;
   }
-  return 0;
+
+  // Phase 3: Staged change detection
+  if (!dirty) {
+    char head_path[PATH_MAX_LEN];
+    if (pathcat(head_path, sizeof(head_path), gitdir, "HEAD")) {
+      FILE *f = fopen(head_path, "r");
+      if (f) {
+        char head[256];
+        if (fgets(head, sizeof(head), f)) {
+          head[strcspn(head, "\n")] = '\0';
+          if (strncmp(head, "ref: ", 5) == 0) {
+            char ref_path[PATH_MAX_LEN];
+            if (pathcat(ref_path, sizeof(ref_path), gitdir, head + 5)) {
+              struct stat ref_st;
+              if (stat(ref_path, &ref_st) == 0) {
+                if (idx_st.st_mtime > ref_st.st_mtime)
+                  dirty = 1;
+              } else {
+                dirty = 1;
+              }
+            }
+          }
+        }
+        fclose(f);
+      }
+    }
+  }
+
+  free(data);
+  return dirty;
+}
+
+static int git_has_stash(const char *gitdir) {
+  char path[PATH_MAX_LEN];
+  return pathcat(path, sizeof(path), gitdir, "refs/stash") && access(path, F_OK) == 0;
 }
 
 static void pr_git(void) {
-  char gd[PATH_MAX_LEN];
-  if (!find_git(gd, sizeof(gd))) return;
+  char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
+  if (!find_git(gd, wt, sizeof(gd))) return;
   char hp[PATH_MAX_LEN];
   if (!pathcat(hp, sizeof(hp), gd, "HEAD")) return;
   FILE *f = fopen(hp, "r");
@@ -590,15 +716,13 @@ static void pr_git(void) {
   fclose(f);
   head[strcspn(head, "\n")] = '\0';
   char br[256];
-  if (strncmp(head, GIT_REF_PREFIX, GIT_REF_PREFIX_LEN) == 0) {
-    strncpy(br, head + GIT_REF_PREFIX_LEN, sizeof(br) - 1);
-    br[sizeof(br) - 1] = '\0';
-  } else {
-    strncpy(br, head, 7);
-    br[7] = '\0';
-  }
+  if (strncmp(head, GIT_REF_PREFIX, GIT_REF_PREFIX_LEN) == 0)
+    snprintf(br, sizeof(br), "%s", head + GIT_REF_PREFIX_LEN);
+  else
+    snprintf(br, sizeof(br), "%.7s", head);
   color(RED); printf("(%s)", br); color(RST);
-  if (git_dirty(gd)) { color(BLD_RED); printf(" *"); color(RST); }
+  if (git_dirty(gd, wt)) { color(BLD_RED); printf(" *"); color(RST); }
+  if (git_has_stash(gd)) { color(YEL); printf(" $"); color(RST); }
   printf(" ");
 }
 
@@ -608,8 +732,7 @@ static void pr_k8s(void) {
   char kc[PATH_MAX_LEN];
   const char *e = getenv("KUBECONFIG");
   if (e && *e) {
-    strncpy(kc, e, sizeof(kc) - 1);
-    kc[sizeof(kc) - 1] = '\0';
+    snprintf(kc, sizeof(kc), "%s", e);
     char *p = strchr(kc, ':');
     if (p) *p = '\0';
   } else {
@@ -624,8 +747,7 @@ static void pr_k8s(void) {
   while (fgets(line, sizeof(line), f)) {
     if (!*ctx && strncmp(line, "current-context:", 16) == 0) {
       char *v = line + 16; while (*v == ' ') v++;
-      strncpy(ctx, v, sizeof(ctx) - 1);
-      ctx[sizeof(ctx) - 1] = '\0';
+      snprintf(ctx, sizeof(ctx), "%s", v);
       ctx[strcspn(ctx, "\n\r")] = '\0';
       rewind(f);
     } else if (*ctx) {
@@ -636,15 +758,13 @@ static void pr_k8s(void) {
       if (np) {
         char *v = np + 5; while (*v == ' ') v++;
         char nm[256];
-        strncpy(nm, v, sizeof(nm) - 1);
-        nm[sizeof(nm) - 1] = '\0';
+        snprintf(nm, sizeof(nm), "%s", v);
         nm[strcspn(nm, "\n\r")] = '\0';
         in_ctx = strcmp(nm, ctx) == 0;
       }
       if (in_ctx && (np = strstr(line, "namespace:"))) {
         char *v = np + 10; while (*v == ' ') v++;
-        strncpy(ns, v, sizeof(ns) - 1);
-        ns[sizeof(ns) - 1] = '\0';
+        snprintf(ns, sizeof(ns), "%s", v);
         ns[strcspn(ns, "\n\r")] = '\0';
         break;
       }
@@ -672,11 +792,9 @@ static void pr_cwd(void) {
   char cwd[PATH_MAX_LEN];
   if (!getcwd(cwd, sizeof(cwd))) return;
   color(BLD_YEL);
-  if (g_mode == MODE_BASH) {
-    const char *h = getenv("HOME");
-    if (h && strncmp(cwd, h, strlen(h)) == 0) printf("~%s", cwd + strlen(h));
-    else printf("%s", cwd);
-  } else printf("%s", cwd);
+  const char *h = getenv("HOME");
+  if (h && strncmp(cwd, h, strlen(h)) == 0) printf("~%s", cwd + strlen(h));
+  else printf("%s", cwd);
   color(RST);
 }
 
