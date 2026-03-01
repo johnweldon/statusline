@@ -15,6 +15,10 @@ install: statusline
 	install -m 755 statusline $(PREFIX)/statusline
 	ln -sf statusline $(PREFIX)/bashline
 
+install-local: statusline
+	install -m 755 statusline $(HOME)/.local/bin/statusline
+	ln -sf statusline $(HOME)/.local/bin/bashline
+
 install-claude: statusline
 	install -m 755 statusline $(CLAUDE)/statusline
 
@@ -27,4 +31,4 @@ clean:
 uninstall:
 	rm -f $(PREFIX)/statusline $(PREFIX)/bashline $(CLAUDE)/statusline
 
-.PHONY: all install install-claude test clean uninstall
+.PHONY: all install install-local install-claude test clean uninstall
