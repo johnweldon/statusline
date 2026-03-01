@@ -668,33 +668,6 @@ static int git_dirty(const char *gitdir, const char *worktree) {
     pos += entry_size;
   }
 
-  // Phase 3: Staged change detection
-  if (!dirty) {
-    char head_path[PATH_MAX_LEN];
-    if (pathcat(head_path, sizeof(head_path), gitdir, "HEAD")) {
-      FILE *f = fopen(head_path, "r");
-      if (f) {
-        char head[256];
-        if (fgets(head, sizeof(head), f)) {
-          head[strcspn(head, "\n")] = '\0';
-          if (strncmp(head, "ref: ", 5) == 0) {
-            char ref_path[PATH_MAX_LEN];
-            if (pathcat(ref_path, sizeof(ref_path), gitdir, head + 5)) {
-              struct stat ref_st;
-              if (stat(ref_path, &ref_st) == 0) {
-                if (idx_st.st_mtime > ref_st.st_mtime)
-                  dirty = 1;
-              } else {
-                dirty = 1;
-              }
-            }
-          }
-        }
-        fclose(f);
-      }
-    }
-  }
-
   free(data);
   return dirty;
 }
