@@ -560,7 +560,7 @@ static int find_git(char *gitdir, char *worktree, size_t sz) {
         if (gd[0] == '/')
           snprintf(gitdir, sz, "%s", gd);
         else
-          snprintf(gitdir, sz, "%s/%s", cwd, gd);
+          pathcat(gitdir, sz, cwd, gd);
         snprintf(worktree, sz, "%s", cwd);
         return 1;
       }
@@ -715,7 +715,7 @@ static void pr_k8s(void) {
   }
   FILE *f = fopen(kc, "r");
   if (!f) return;
-  char line[1024], ctx[256] = "", ns[256] = "";
+  char line[1024], ctx[1024] = "", ns[256] = "";
   int in_ctx = 0, found = 0;
   while (fgets(line, sizeof(line), f)) {
     if (!*ctx && strncmp(line, "current-context:", 16) == 0) {
