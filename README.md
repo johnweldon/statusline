@@ -13,11 +13,13 @@ make install-claude # ~/.claude/statusline
 ## Usage
 
 **Bash mode** (use `bashline` symlink for automatic `--bash --ps1`):
+
 ```bash
 bashline --exit-code=$? --shlvl=$SHLVL --jobs=N
 ```
 
 **Claude mode** (reads JSON from stdin):
+
 ```bash
 echo '{"display_name":"opus"}' | statusline
 ```
@@ -55,10 +57,12 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "StatusLine": [{
-      "matcher": "",
-      "hooks": [{ "type": "command", "command": "~/.claude/statusline" }]
-    }]
+    "StatusLine": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "~/.claude/statusline" }]
+      }
+    ]
   }
 }
 ```
@@ -66,12 +70,14 @@ Add to `~/.claude/settings.json`:
 ## Display
 
 **Bash mode** (two lines):
+
 ```
 [venv] -ssh- user@host:~/path (branch) * context|ns [N jobs] (shlvl)
 HH:MM:SS N $
 ```
 
 **Claude mode** (single line):
+
 ```
 [Model] N% (used/total) [cache: r:N w:N] [Nh Mm left] user@host:path (branch) * context|ns HH:MM:SS
 ```
@@ -87,13 +93,13 @@ HH:MM:SS N $
 
 ## Environment Variables
 
-| Variable | Description |
-| -------- | ----------- |
-| `NO_COLOR` | Disable colored output (any value) |
-| `STATUSLINE_MODE` | Default mode: `bash` or `claude` |
-| `KUBECONFIG` | Kubernetes config file path |
-| `VIRTUAL_ENV` | Python virtualenv path (bash mode) |
-| `SSH_TTY` | Detected for SSH indicator (bash mode) |
+| Variable          | Description                            |
+| ----------------- | -------------------------------------- |
+| `NO_COLOR`        | Disable colored output (any value)     |
+| `STATUSLINE_MODE` | Default mode: `bash` or `claude`       |
+| `KUBECONFIG`      | Kubernetes config file path            |
+| `VIRTUAL_ENV`     | Python virtualenv path (bash mode)     |
+| `SSH_TTY`         | Detected for SSH indicator (bash mode) |
 
 ## Platform Support
 

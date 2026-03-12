@@ -17,17 +17,17 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BLOCK_HOURS     5
-#define CACHE_TTL_SECS  60
-#define BUF_SIZE        65536
-#define PATH_MAX_LEN    4096
+#define BLOCK_HOURS 5
+#define CACHE_TTL_SECS 60
+#define BUF_SIZE 65536
+#define PATH_MAX_LEN 4096
 #define MAX_FILES_CHECK 200
 
-#define JSONL_EXT       ".jsonl"
-#define JSONL_EXT_LEN   6
-#define TS_PREFIX       "\"timestamp\":\""
-#define USAGE_PREFIX    "\"usage\":{"
-#define GIT_REF_PREFIX  "ref: refs/heads/"
+#define JSONL_EXT ".jsonl"
+#define JSONL_EXT_LEN 6
+#define TS_PREFIX "\"timestamp\":\""
+#define USAGE_PREFIX "\"usage\":{"
+#define GIT_REF_PREFIX "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
 
 typedef struct {
@@ -42,8 +42,10 @@ typedef struct {
 
 static int cmp_file_mtime_desc(const void *a, const void *b) {
   const file_entry_t *fa = a, *fb = b;
-  if (fb->mtime > fa->mtime) return 1;
-  if (fb->mtime < fa->mtime) return -1;
+  if (fb->mtime > fa->mtime)
+    return 1;
+  if (fb->mtime < fa->mtime)
+    return -1;
   return 0;
 }
 
@@ -76,9 +78,12 @@ static int g_shlvl = 0;
 #define BLD_WHT "\033[1;37m"
 
 static void color(const char *c) {
-  if (g_no_color) return;
-  if (g_fmt == FMT_PS1) printf("\001%s\002", c);
-  else printf("%s", c);
+  if (g_no_color)
+    return;
+  if (g_fmt == FMT_PS1)
+    printf("\001%s\002", c);
+  else
+    printf("%s", c);
 }
 
 // Safe path construction - returns 1 on success
@@ -88,14 +93,18 @@ static int pathcat(char *out, size_t sz, const char *a, const char *b) {
 }
 
 // Extract quoted value after prefix into out, returns length or 0
-static size_t extract_quoted(const char *s, const char *prefix, char *out, size_t sz) {
+static size_t extract_quoted(const char *s, const char *prefix, char *out,
+                             size_t sz) {
   char *p = strstr(s, prefix);
-  if (!p) return 0;
+  if (!p)
+    return 0;
   p += strlen(prefix);
   char *q = strchr(p, '"');
-  if (!q || q <= p) return 0;
+  if (!q || q <= p)
+    return 0;
   size_t len = (size_t)(q - p);
-  if (len >= sz) return 0;
+  if (len >= sz)
+    return 0;
   memcpy(out, p, len);
   out[len] = '\0';
   return len;
@@ -106,12 +115,15 @@ static int json_str(const char *json, const char *key, char *out, size_t sz) {
   char pat[256];
   snprintf(pat, sizeof(pat), "\"%s\":\"", key);
   const char *s = strstr(json, pat);
-  if (!s) return 0;
+  if (!s)
+    return 0;
   s += strlen(pat);
   const char *e = strchr(s, '"');
-  if (!e) return 0;
+  if (!e)
+    return 0;
   size_t n = (size_t)(e - s);
-  if (n >= sz) n = sz - 1;
+  if (n >= sz)
+    n = sz - 1;
   memcpy(out, s, n);
   out[n] = '\0';
   return 1;
@@ -121,37 +133,45 @@ static long json_long(const char *json, const char *key) {
   char pat[256];
   snprintf(pat, sizeof(pat), "\"%s\":", key);
   const char *s = strstr(json, pat);
-  if (!s) return -1;
+  if (!s)
+    return -1;
   s += strlen(pat);
-  while (*s == ' ' || *s == '\t') s++;
-  if (*s == '"') return -1;
+  while (*s == ' ' || *s == '\t')
+    s++;
+  if (*s == '"')
+    return -1;
   return strtol(s, NULL, 10);
 }
 
 // Fast ISO 8601 UTC timestamp parser using direct character arithmetic
 // Format: YYYY-MM-DDTHH:MM:SS (Z suffix ignored, assumes UTC)
-// ~5x faster than sscanf + timegm by avoiding format string parsing and syscalls
+// ~5x faster than sscanf + timegm by avoiding format string parsing and
+// syscalls
 static time_t parse_iso(const char *ts) {
   // Quick validation: minimum length "YYYY-MM-DDTHH:MM:SS" = 19 chars
-  if (!ts || strlen(ts) < 19) return 0;
+  if (!ts || strlen(ts) < 19)
+    return 0;
 
-  // Parse digits directly - each digit pair: (c[0]-'0')*10 + (c[1]-'0')
-  #define D2(p) ((ts[p] - '0') * 10 + ts[p+1] - '0')
-  #define D4(p) ((ts[p] - '0') * 1000 + (ts[p+1] - '0') * 100 + (ts[p+2] - '0') * 10 + ts[p+3] - '0')
+// Parse digits directly - each digit pair: (c[0]-'0')*10 + (c[1]-'0')
+#define D2(p) ((ts[p] - '0') * 10 + ts[p + 1] - '0')
+#define D4(p)                                                                  \
+  ((ts[p] - '0') * 1000 + (ts[p + 1] - '0') * 100 + (ts[p + 2] - '0') * 10 +   \
+   ts[p + 3] - '0')
 
-  int y = D4(0);          // YYYY at pos 0-3
-  int mo = D2(5);         // MM at pos 5-6
-  int d = D2(8);          // DD at pos 8-9
-  int h = D2(11);         // HH at pos 11-12
-  int mi = D2(14);        // MM at pos 14-15
-  int se = D2(17);        // SS at pos 17-18
+  int y = D4(0);   // YYYY at pos 0-3
+  int mo = D2(5);  // MM at pos 5-6
+  int d = D2(8);   // DD at pos 8-9
+  int h = D2(11);  // HH at pos 11-12
+  int mi = D2(14); // MM at pos 14-15
+  int se = D2(17); // SS at pos 17-18
 
-  #undef D2
-  #undef D4
+#undef D2
+#undef D4
 
   // Basic validation
-  if (y < 1970 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
-      h > 23 || mi > 59 || se > 59) return 0;
+  if (y < 1970 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 ||
+      mi > 59 || se > 59)
+    return 0;
 
   // Days in each month (non-leap year)
   static const int mdays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
@@ -159,15 +179,18 @@ static time_t parse_iso(const char *ts) {
   // Calculate days since Unix epoch (Jan 1, 1970)
   // Years contribution: count leap years from 1970 to y-1
   int years = y - 1970;
-  int leap_years = (y - 1) / 4 - 1969 / 4 - ((y - 1) / 100 - 1969 / 100) + ((y - 1) / 400 - 1969 / 400);
+  int leap_years = (y - 1) / 4 - 1969 / 4 - ((y - 1) / 100 - 1969 / 100) +
+                   ((y - 1) / 400 - 1969 / 400);
   long days = years * 365L + leap_years;
 
   // Months contribution
-  for (int i = 0; i < mo - 1; i++) days += mdays[i];
+  for (int i = 0; i < mo - 1; i++)
+    days += mdays[i];
 
   // Add Feb 29 if current year is leap and we're past February
   int is_leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
-  if (is_leap && mo > 2) days++;
+  if (is_leap && mo > 2)
+    days++;
 
   // Days contribution (1-indexed, so subtract 1)
   days += d - 1;
@@ -178,19 +201,24 @@ static time_t parse_iso(const char *ts) {
 
 // Read stdin for claude mode
 static void read_stdin(void) {
-  if (g_mode != MODE_CLAUDE || isatty(STDIN_FILENO)) return;
+  if (g_mode != MODE_CLAUDE || isatty(STDIN_FILENO))
+    return;
   size_t n, total = 0;
-  while ((n = fread(g_input + total, 1, sizeof(g_input) - total - 1, stdin)) > 0) {
+  while ((n = fread(g_input + total, 1, sizeof(g_input) - total - 1, stdin)) >
+         0) {
     total += n;
-    if (total >= sizeof(g_input) - 1) break;
+    if (total >= sizeof(g_input) - 1)
+      break;
   }
-  if (ferror(stdin)) total = 0;
+  if (ferror(stdin))
+    total = 0;
   g_input[total] = '\0';
 }
 
 // Claude: model and context info
 static void pr_claude_info(void) {
-  if (g_mode != MODE_CLAUDE) return;
+  if (g_mode != MODE_CLAUDE)
+    return;
   char model[128] = "Unknown";
   json_str(g_input, "display_name", model, sizeof(model));
   long in = json_long(g_input, "input_tokens");
@@ -198,29 +226,49 @@ static void pr_claude_info(void) {
   long cr = json_long(g_input, "cache_read_input_tokens");
   long win = json_long(g_input, "context_window_size");
 
-  color(MAG); printf("[%s]", model); color(RST); printf(" ");
+  color(MAG);
+  printf("[%s]", model);
+  color(RST);
+  printf(" ");
   if (in >= 0) {
     // Safe addition with overflow check before each operation
     long cur = in;
     if (cw > 0) {
-      if (cur > LONG_MAX - cw) cur = LONG_MAX;
-      else cur += cw;
+      if (cur > LONG_MAX - cw)
+        cur = LONG_MAX;
+      else
+        cur += cw;
     }
     if (cr > 0) {
-      if (cur > LONG_MAX - cr) cur = LONG_MAX;
-      else cur += cr;
+      if (cur > LONG_MAX - cr)
+        cur = LONG_MAX;
+      else
+        cur += cr;
     }
     if (win > 0) {
-      long pct = (cur >= win) ? 100 : (win >= 100 ? cur / (win / 100) : cur * 100 / win);
-      color(BLU); printf("%ld%%", pct); color(RST); printf(" ");
-      color(DIM_BLU); printf("(%ld/%ld)", cur, win); color(RST); printf(" ");
+      long pct = (cur >= win)
+                     ? 100
+                     : (win >= 100 ? cur / (win / 100) : cur * 100 / win);
+      color(BLU);
+      printf("%ld%%", pct);
+      color(RST);
+      printf(" ");
+      color(DIM_BLU);
+      printf("(%ld/%ld)", cur, win);
+      color(RST);
+      printf(" ");
     } else {
       // Show token count even without context window size
-      color(DIM_BLU); printf("(%ld)", cur); color(RST); printf(" ");
+      color(DIM_BLU);
+      printf("(%ld)", cur);
+      color(RST);
+      printf(" ");
     }
     if (cr > 0 || cw > 0) {
-      color(CYN); printf("[cache: r:%ld w:%ld]", cr > 0 ? cr : 0, cw > 0 ? cw : 0);
-      color(RST); printf(" ");
+      color(CYN);
+      printf("[cache: r:%ld w:%ld]", cr > 0 ? cr : 0, cw > 0 ? cw : 0);
+      color(RST);
+      printf(" ");
     }
   }
 }
@@ -228,14 +276,19 @@ static void pr_claude_info(void) {
 // Extract token counts from usage JSON
 static long extract_tokens(const char *line) {
   char *u = strstr(line, USAGE_PREFIX);
-  if (!u) return 0;
+  if (!u)
+    return 0;
   long total = 0;
-  // Parse input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
-  const char *keys[] = {"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"};
-  for (size_t i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
+  // Parse input_tokens, output_tokens, cache_creation_input_tokens,
+  // cache_read_input_tokens
+  const char *keys[] = {"input_tokens", "output_tokens",
+                        "cache_creation_input_tokens",
+                        "cache_read_input_tokens"};
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
     long v = json_long(u, keys[i]);
     if (v > 0) {
-      if (total > LONG_MAX - v) return LONG_MAX; // Saturate on overflow
+      if (total > LONG_MAX - v)
+        return LONG_MAX; // Saturate on overflow
       total += v;
     }
   }
@@ -251,7 +304,8 @@ typedef struct {
 
 static unsigned hash_str(const char *s) {
   unsigned h = 5381;
-  while (*s) h = ((h << 5) + h) ^ (unsigned char)*s++;
+  while (*s)
+    h = ((h << 5) + h) ^ (unsigned char)*s++;
   return h;
 }
 
@@ -265,9 +319,10 @@ static int msg_id_seen(msg_id_set_t *set, const char *id) {
       set->count++;
       return 0;
     }
-    if (strcmp(set->ids[slot], id) == 0) return 1;  // Already seen
+    if (strcmp(set->ids[slot], id) == 0)
+      return 1; // Already seen
   }
-  return 1;  // Table full, treat as seen to avoid duplicates
+  return 1; // Table full, treat as seen to avoid duplicates
 }
 
 // Process a single JSONL line for block info
@@ -275,19 +330,24 @@ static int msg_id_seen(msg_id_set_t *set, const char *id) {
 static int process_jsonl_line(const char *line, time_t now, time_t cutoff,
                               block_info_t *info, msg_id_set_t *seen) {
   char ts[64];
-  if (!extract_quoted(line, TS_PREFIX, ts, sizeof(ts))) return 1;
+  if (!extract_quoted(line, TS_PREFIX, ts, sizeof(ts)))
+    return 1;
 
   time_t line_ts = parse_iso(ts);
-  if (line_ts <= 0) return 1;
+  if (line_ts <= 0)
+    return 1;
 
   // If timestamp is before cutoff, signal to stop (file is chronological)
-  if (line_ts < cutoff) return 0;
+  if (line_ts < cutoff)
+    return 0;
 
   // Skip future timestamps
-  if (line_ts > now) return 1;
+  if (line_ts > now)
+    return 1;
 
   // Track earliest timestamp in block
-  if (!info->start || line_ts < info->start) info->start = line_ts;
+  if (!info->start || line_ts < info->start)
+    info->start = line_ts;
 
   // Count tokens (deduplicated by message ID)
   if (strstr(line, USAGE_PREFIX)) {
@@ -310,13 +370,20 @@ static int process_jsonl_line(const char *line, time_t now, time_t cutoff,
 static void process_file_reverse(const char *path, time_t now, time_t cutoff,
                                  block_info_t *info, msg_id_set_t *seen) {
   int fd = open(path, O_RDONLY);
-  if (fd < 0) return;
+  if (fd < 0)
+    return;
 
   off_t size = lseek(fd, 0, SEEK_END);
-  if (size <= 0) { close(fd); return; }
+  if (size <= 0) {
+    close(fd);
+    return;
+  }
 
   char *buf = malloc(CHUNK_SIZE + MAX_LINE_LEN);
-  if (!buf) { close(fd); return; }
+  if (!buf) {
+    close(fd);
+    return;
+  }
 
   char *partial = NULL;
   size_t partial_len = 0;
@@ -328,11 +395,13 @@ static void process_file_reverse(const char *path, time_t now, time_t cutoff,
     size_t chunk_len = (size_t)(pos - chunk_start);
     lseek(fd, chunk_start, SEEK_SET);
 
-    if (read(fd, buf, chunk_len) != (ssize_t)chunk_len) break;
+    if (read(fd, buf, chunk_len) != (ssize_t)chunk_len)
+      break;
 
     // Append any partial line from previous chunk (with bounds check)
     if (partial) {
-      if (partial_len <= MAX_LINE_LEN && chunk_len + partial_len <= CHUNK_SIZE + MAX_LINE_LEN) {
+      if (partial_len <= MAX_LINE_LEN &&
+          chunk_len + partial_len <= CHUNK_SIZE + MAX_LINE_LEN) {
         memcpy(buf + chunk_len, partial, partial_len);
         chunk_len += partial_len;
       }
@@ -348,7 +417,8 @@ static void process_file_reverse(const char *path, time_t now, time_t cutoff,
     while (line_end > buf) {
       // Find start of current line (scan backwards for newline)
       char *line_start = line_end - 1;
-      while (line_start > buf && *(line_start - 1) != '\n') line_start--;
+      while (line_start > buf && *(line_start - 1) != '\n')
+        line_start--;
 
       // Null-terminate the line
       char saved = *line_end;
@@ -366,21 +436,25 @@ static void process_file_reverse(const char *path, time_t now, time_t cutoff,
 
       *line_end = saved;
       line_end = line_start;
-      if (line_end > buf) line_end--;  // Skip the newline
+      if (line_end > buf)
+        line_end--; // Skip the newline
     }
 
     // Save incomplete first line for next chunk (content before first newline)
-    // When reading backwards, this fragment completes a line in the previous chunk
+    // When reading backwards, this fragment completes a line in the previous
+    // chunk
     if (chunk_start > 0) {
       char *first_nl = memchr(buf, '\n', end - buf);
       if (first_nl) {
         partial_len = (size_t)(first_nl - buf);
         if (partial_len > 0 && partial_len <= MAX_LINE_LEN) {
           partial = malloc(partial_len);
-          if (partial) memcpy(partial, buf, partial_len);
-          else partial_len = 0;
+          if (partial)
+            memcpy(partial, buf, partial_len);
+          else
+            partial_len = 0;
         } else {
-          partial_len = 0;  // Skip oversized partial lines
+          partial_len = 0; // Skip oversized partial lines
         }
       }
     }
@@ -394,37 +468,51 @@ static void process_file_reverse(const char *path, time_t now, time_t cutoff,
 }
 
 // Claude: find block start and count tokens
-// Collects JSONL files, sorts by mtime descending, processes each file backwards
+// Collects JSONL files, sorts by mtime descending, processes each file
+// backwards
 static block_info_t find_block_info(time_t now) {
   block_info_t info = {0, 0};
   const char *home = getenv("HOME");
-  if (!home) return info;
+  if (!home)
+    return info;
   char path[PATH_MAX_LEN];
-  if (snprintf(path, sizeof(path), "%s/.claude/projects", home) < 0) return info;
+  if (snprintf(path, sizeof(path), "%s/.claude/projects", home) < 0)
+    return info;
   DIR *pd = opendir(path);
-  if (!pd) return info;
+  if (!pd)
+    return info;
 
   time_t cutoff = now - BLOCK_HOURS * 3600;
   file_entry_t *files = malloc(MAX_FILES_CHECK * sizeof(file_entry_t));
-  if (!files) { closedir(pd); return info; }
+  if (!files) {
+    closedir(pd);
+    return info;
+  }
   int nfiles = 0;
   struct dirent *pe;
 
   // Phase 1: Collect all eligible JSONL files
   while ((pe = readdir(pd))) {
-    if (pe->d_name[0] == '.') continue;
+    if (pe->d_name[0] == '.')
+      continue;
     char ppath[PATH_MAX_LEN];
-    if (!pathcat(ppath, sizeof(ppath), path, pe->d_name)) continue;
+    if (!pathcat(ppath, sizeof(ppath), path, pe->d_name))
+      continue;
     DIR *sd = opendir(ppath);
-    if (!sd) continue;
+    if (!sd)
+      continue;
     struct dirent *se;
     while ((se = readdir(sd)) && nfiles < MAX_FILES_CHECK) {
       size_t len = strlen(se->d_name);
-      if (len < JSONL_EXT_LEN + 1 || strcmp(se->d_name + len - JSONL_EXT_LEN, JSONL_EXT)) continue;
+      if (len < JSONL_EXT_LEN + 1 ||
+          strcmp(se->d_name + len - JSONL_EXT_LEN, JSONL_EXT))
+        continue;
       char fpath[PATH_MAX_LEN];
-      if (!pathcat(fpath, sizeof(fpath), ppath, se->d_name)) continue;
+      if (!pathcat(fpath, sizeof(fpath), ppath, se->d_name))
+        continue;
       struct stat st;
-      if (stat(fpath, &st) || !S_ISREG(st.st_mode) || st.st_mtime < cutoff) continue;
+      if (stat(fpath, &st) || !S_ISREG(st.st_mode) || st.st_mtime < cutoff)
+        continue;
       snprintf(files[nfiles].path, sizeof(files[nfiles].path), "%s", fpath);
       files[nfiles].mtime = st.st_mtime;
       nfiles++;
@@ -446,37 +534,46 @@ static block_info_t find_block_info(time_t now) {
   }
 
   free(files);
-  if (info.start) info.start -= info.start % 3600; // Round to hour
+  if (info.start)
+    info.start -= info.start % 3600; // Round to hour
   return info;
 }
 
 // Format large numbers with K/M suffix
 static void print_tokens(long tokens) {
-  if (tokens >= 1000000) printf("%.1fM", tokens / 1000000.0);
-  else if (tokens >= 1000) printf("%.0fK", tokens / 1000.0);
-  else printf("%ld", tokens);
+  if (tokens >= 1000000)
+    printf("%.1fM", tokens / 1000000.0);
+  else if (tokens >= 1000)
+    printf("%.0fK", tokens / 1000.0);
+  else
+    printf("%ld", tokens);
 }
 
 // Read cache file (assumes fd is open and optionally locked)
 // Returns 1 if valid cache found, 0 otherwise
 static int read_cache(int fd, time_t now, time_t max_age, block_info_t *info) {
   FILE *c = fdopen(dup(fd), "r");
-  if (!c) return 0;
+  if (!c)
+    return 0;
   time_t ct;
   char ver[4] = "";
-  int valid = fscanf(c, "%3[^:]:%ld:%ld:%ld", ver, &ct, &info->start, &info->tokens) == 4 &&
-              strcmp(ver, "v1") == 0 && ct <= now && now - ct < max_age && info->start > 0;
+  int valid = fscanf(c, "%3[^:]:%ld:%ld:%ld", ver, &ct, &info->start,
+                     &info->tokens) == 4 &&
+              strcmp(ver, "v1") == 0 && ct <= now && now - ct < max_age &&
+              info->start > 0;
   fclose(c);
   return valid;
 }
 
 static void pr_block_time(void) {
-  if (g_mode != MODE_CLAUDE) return;
+  if (g_mode != MODE_CLAUDE)
+    return;
   time_t now = time(NULL);
   block_info_t info = {0, 0};
 
   int fd = open(g_cache_path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
-  if (fd < 0) return;
+  if (fd < 0)
+    return;
 
   // Try non-blocking exclusive lock first
   if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
@@ -499,48 +596,69 @@ static void pr_block_time(void) {
     // If shared lock also fails, gracefully degrade (info remains {0,0})
   }
   close(fd);
-  if (!info.start) return;
+  if (!info.start)
+    return;
   long secs = info.start + BLOCK_HOURS * 3600 - now;
-  if (secs <= 0) return;
+  if (secs <= 0)
+    return;
   int h = secs / 3600, m = (secs % 3600) / 60;
   color(YEL);
-  if (h > 0) printf("[%dh %dm", h, m);
-  else printf("[%dm", m);
+  if (h > 0)
+    printf("[%dh %dm", h, m);
+  else
+    printf("[%dm", m);
   if (info.tokens > 0) {
     printf(" ");
     print_tokens(info.tokens);
   }
   printf("]");
-  color(RST); printf(" ");
+  color(RST);
+  printf(" ");
 }
 
 // Bash: virtualenv, ssh, shlvl
 static void pr_venv(void) {
-  if (g_mode != MODE_BASH) return;
+  if (g_mode != MODE_BASH)
+    return;
   const char *v = getenv("VIRTUAL_ENV");
-  if (!v || !*v) return;
+  if (!v || !*v)
+    return;
   const char *n = strrchr(v, '/');
-  color(BLD_WHT); printf("[%s]", n ? n + 1 : v); color(RST); printf(" ");
+  color(BLD_WHT);
+  printf("[%s]", n ? n + 1 : v);
+  color(RST);
+  printf(" ");
 }
 
 static void pr_ssh(void) {
-  if (g_mode != MODE_BASH) return;
-  if (!getenv("SSH_TTY")) return;
-  color(YEL); printf("-ssh-"); color(RST); printf(" ");
+  if (g_mode != MODE_BASH)
+    return;
+  if (!getenv("SSH_TTY"))
+    return;
+  color(YEL);
+  printf("-ssh-");
+  color(RST);
+  printf(" ");
 }
 
 static void pr_shlvl(void) {
-  if (g_mode != MODE_BASH || g_shlvl <= 1) return;
-  color(BLD_CYN); printf("(%d)", g_shlvl); color(RST); printf(" ");
+  if (g_mode != MODE_BASH || g_shlvl <= 1)
+    return;
+  color(BLD_CYN);
+  printf("(%d)", g_shlvl);
+  color(RST);
+  printf(" ");
 }
 
 // Git
 static int find_git(char *gitdir, char *worktree, size_t sz) {
   char cwd[PATH_MAX_LEN];
-  if (!getcwd(cwd, sizeof(cwd))) return 0;
+  if (!getcwd(cwd, sizeof(cwd)))
+    return 0;
   while (*cwd) {
     char dotgit[PATH_MAX_LEN];
-    if (!pathcat(dotgit, sizeof(dotgit), cwd, ".git")) return 0;
+    if (!pathcat(dotgit, sizeof(dotgit), cwd, ".git"))
+      return 0;
     struct stat st;
     if (stat(dotgit, &st) == 0) {
       if (S_ISDIR(st.st_mode)) {
@@ -550,12 +668,17 @@ static int find_git(char *gitdir, char *worktree, size_t sz) {
       }
       if (S_ISREG(st.st_mode)) {
         FILE *f = fopen(dotgit, "r");
-        if (!f) return 0;
+        if (!f)
+          return 0;
         char line[PATH_MAX_LEN];
-        if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
+        if (!fgets(line, sizeof(line), f)) {
+          fclose(f);
+          return 0;
+        }
         fclose(f);
         line[strcspn(line, "\n\r")] = '\0';
-        if (strncmp(line, "gitdir: ", 8) != 0) return 0;
+        if (strncmp(line, "gitdir: ", 8) != 0)
+          return 0;
         const char *gd = line + 8;
         if (gd[0] == '/')
           snprintf(gitdir, sz, "%s", gd);
@@ -566,7 +689,8 @@ static int find_git(char *gitdir, char *worktree, size_t sz) {
       }
     }
     char *p = strrchr(cwd, '/');
-    if (!p || p == cwd) break;
+    if (!p || p == cwd)
+      break;
     *p = '\0';
   }
   return 0;
@@ -589,39 +713,65 @@ static int git_dirty(const char *gitdir, const char *worktree) {
   // Phase 1: Check for in-progress operations
   const char *ops[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
                        "REBASE_HEAD", "BISECT_LOG"};
-  for (size_t i = 0; i < sizeof(ops)/sizeof(ops[0]); i++) {
+  for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
     if (pathcat(path, sizeof(path), gitdir, ops[i]) && access(path, F_OK) == 0)
       return 1;
   }
 
   // Phase 2: Parse git index and compare against filesystem
-  if (!pathcat(path, sizeof(path), gitdir, "index")) return 0;
+  if (!pathcat(path, sizeof(path), gitdir, "index"))
+    return 0;
   int fd = open(path, O_RDONLY);
-  if (fd < 0) return 0;
+  if (fd < 0)
+    return 0;
 
   struct stat idx_st;
-  if (fstat(fd, &idx_st) != 0) { close(fd); return 0; }
+  if (fstat(fd, &idx_st) != 0) {
+    close(fd);
+    return 0;
+  }
 
   unsigned char hdr[12];
-  if (read(fd, hdr, 12) != 12) { close(fd); return 0; }
-  if (memcmp(hdr, "DIRC", 4) != 0) { close(fd); return 0; }
+  if (read(fd, hdr, 12) != 12) {
+    close(fd);
+    return 0;
+  }
+  if (memcmp(hdr, "DIRC", 4) != 0) {
+    close(fd);
+    return 0;
+  }
   uint32_t version = read_be32(hdr + 4);
-  if (version < 2 || version > 3) { close(fd); return 0; }
+  if (version < 2 || version > 3) {
+    close(fd);
+    return 0;
+  }
   uint32_t nentries = read_be32(hdr + 8);
-  if (nentries > GIT_INDEX_MAX_ENTRIES) nentries = GIT_INDEX_MAX_ENTRIES;
+  if (nentries > GIT_INDEX_MAX_ENTRIES)
+    nentries = GIT_INDEX_MAX_ENTRIES;
 
   size_t datasz = (size_t)(idx_st.st_size - 12);
-  if (datasz > 4 * 1024 * 1024) { close(fd); return 0; }
+  if (datasz > 4 * 1024 * 1024) {
+    close(fd);
+    return 0;
+  }
   unsigned char *data = malloc(datasz);
-  if (!data) { close(fd); return 0; }
-  if (read(fd, data, datasz) != (ssize_t)datasz) { free(data); close(fd); return 0; }
+  if (!data) {
+    close(fd);
+    return 0;
+  }
+  if (read(fd, data, datasz) != (ssize_t)datasz) {
+    free(data);
+    close(fd);
+    return 0;
+  }
   close(fd);
 
   int dirty = 0;
   size_t pos = 0;
 
   for (uint32_t i = 0; i < nentries && !dirty; i++) {
-    if (pos + 62 > datasz) break;
+    if (pos + 62 > datasz)
+      break;
     const unsigned char *e = data + pos;
     uint32_t stored_mtime = read_be32(e + 8);
     uint32_t stored_mode = read_be32(e + 24);
@@ -631,24 +781,30 @@ static int git_dirty(const char *gitdir, const char *worktree) {
     size_t name_off = 62;
     if (version >= 3 && (flags & 0x4000))
       name_off = 64;
-    if (pos + name_off >= datasz) break;
+    if (pos + name_off >= datasz)
+      break;
 
     uint16_t flaglen = flags & 0x0FFF;
     size_t namelen;
     if (flaglen < 0x0FFF) {
       namelen = flaglen;
     } else {
-      const unsigned char *nul = memchr(e + name_off, 0, datasz - pos - name_off);
-      if (!nul) break;
+      const unsigned char *nul =
+          memchr(e + name_off, 0, datasz - pos - name_off);
+      if (!nul)
+        break;
       namelen = (size_t)(nul - (e + name_off));
     }
 
     size_t entry_size = (name_off + namelen + 8) & ~(size_t)7;
 
     char fpath[PATH_MAX_LEN];
-    int n = snprintf(fpath, sizeof(fpath), "%s/%.*s",
-                     worktree, (int)namelen, (const char *)(e + name_off));
-    if (n < 0 || (size_t)n >= sizeof(fpath)) { pos += entry_size; continue; }
+    int n = snprintf(fpath, sizeof(fpath), "%s/%.*s", worktree, (int)namelen,
+                     (const char *)(e + name_off));
+    if (n < 0 || (size_t)n >= sizeof(fpath)) {
+      pos += entry_size;
+      continue;
+    }
 
     struct stat st;
     if (lstat(fpath, &st) != 0) {
@@ -674,18 +830,25 @@ static int git_dirty(const char *gitdir, const char *worktree) {
 
 static int git_has_stash(const char *gitdir) {
   char path[PATH_MAX_LEN];
-  return pathcat(path, sizeof(path), gitdir, "refs/stash") && access(path, F_OK) == 0;
+  return pathcat(path, sizeof(path), gitdir, "refs/stash") &&
+         access(path, F_OK) == 0;
 }
 
 static void pr_git(void) {
   char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
-  if (!find_git(gd, wt, sizeof(gd))) return;
+  if (!find_git(gd, wt, sizeof(gd)))
+    return;
   char hp[PATH_MAX_LEN];
-  if (!pathcat(hp, sizeof(hp), gd, "HEAD")) return;
+  if (!pathcat(hp, sizeof(hp), gd, "HEAD"))
+    return;
   FILE *f = fopen(hp, "r");
-  if (!f) return;
+  if (!f)
+    return;
   char head[256];
-  if (!fgets(head, sizeof(head), f)) { fclose(f); return; }
+  if (!fgets(head, sizeof(head), f)) {
+    fclose(f);
+    return;
+  }
   fclose(f);
   head[strcspn(head, "\n")] = '\0';
   char br[256];
@@ -693,9 +856,19 @@ static void pr_git(void) {
     snprintf(br, sizeof(br), "%s", head + GIT_REF_PREFIX_LEN);
   else
     snprintf(br, sizeof(br), "%.7s", head);
-  color(RED); printf("(%s)", br); color(RST);
-  if (git_dirty(gd, wt)) { color(BLD_RED); printf(" *"); color(RST); }
-  if (git_has_stash(gd)) { color(YEL); printf(" $"); color(RST); }
+  color(RED);
+  printf("(%s)", br);
+  color(RST);
+  if (git_dirty(gd, wt)) {
+    color(BLD_RED);
+    printf(" *");
+    color(RST);
+  }
+  if (git_has_stash(gd)) {
+    color(YEL);
+    printf(" $");
+    color(RST);
+  }
   printf(" ");
 }
 
@@ -707,36 +880,50 @@ static void pr_k8s(void) {
   if (e && *e) {
     snprintf(kc, sizeof(kc), "%s", e);
     char *p = strchr(kc, ':');
-    if (p) *p = '\0';
+    if (p)
+      *p = '\0';
   } else {
     const char *h = getenv("HOME");
-    if (!h) return;
+    if (!h)
+      return;
     snprintf(kc, sizeof(kc), "%s/.kube/config", h);
   }
   FILE *f = fopen(kc, "r");
-  if (!f) return;
+  if (!f)
+    return;
   char line[1024], ctx[1024] = "", ns[256] = "";
   int in_ctx = 0, found = 0;
   while (fgets(line, sizeof(line), f)) {
     if (!*ctx && strncmp(line, "current-context:", 16) == 0) {
-      char *v = line + 16; while (*v == ' ') v++;
+      char *v = line + 16;
+      while (*v == ' ')
+        v++;
       snprintf(ctx, sizeof(ctx), "%s", v);
       ctx[strcspn(ctx, "\n\r")] = '\0';
       rewind(f);
     } else if (*ctx) {
-      if (strncmp(line, "contexts:", 9) == 0) { found = 1; continue; }
-      if (!found) continue;
-      if (line[0] != ' ' && line[0] != '-' && line[0] != '\n') break;
+      if (strncmp(line, "contexts:", 9) == 0) {
+        found = 1;
+        continue;
+      }
+      if (!found)
+        continue;
+      if (line[0] != ' ' && line[0] != '-' && line[0] != '\n')
+        break;
       char *np = strstr(line, "name:");
       if (np) {
-        char *v = np + 5; while (*v == ' ') v++;
+        char *v = np + 5;
+        while (*v == ' ')
+          v++;
         char nm[256];
         snprintf(nm, sizeof(nm), "%s", v);
         nm[strcspn(nm, "\n\r")] = '\0';
         in_ctx = strcmp(nm, ctx) == 0;
       }
       if (in_ctx && (np = strstr(line, "namespace:"))) {
-        char *v = np + 10; while (*v == ' ') v++;
+        char *v = np + 10;
+        while (*v == ' ')
+          v++;
         snprintf(ns, sizeof(ns), "%s", v);
         ns[strcspn(ns, "\n\r")] = '\0';
         break;
@@ -744,53 +931,84 @@ static void pr_k8s(void) {
     }
   }
   fclose(f);
-  if (!*ctx) return;
-  color(GRN); printf("%s", ctx);
-  if (*ns) { color(WHT); printf("|"); color(DIM_GRN); printf("%s", ns); }
-  color(RST); printf(" ");
+  if (!*ctx)
+    return;
+  color(GRN);
+  printf("%s", ctx);
+  if (*ns) {
+    color(WHT);
+    printf("|");
+    color(DIM_GRN);
+    printf("%s", ns);
+  }
+  color(RST);
+  printf(" ");
 }
 
 // Common
 static void pr_userhost(void) {
   char hn[256] = "unknown";
-  if (gethostname(hn, sizeof(hn)) != 0) hn[0] = '?', hn[1] = '\0';
+  if (gethostname(hn, sizeof(hn)) != 0)
+    hn[0] = '?', hn[1] = '\0';
   hn[sizeof(hn) - 1] = '\0';
-  char *p = strchr(hn, '.'); if (p) *p = '\0';
+  char *p = strchr(hn, '.');
+  if (p)
+    *p = '\0';
   struct passwd *pw = getpwuid(getuid());
-  color(CYN); printf("%s", pw ? pw->pw_name : "?");
-  color(BLD_CYN); printf("@%s", hn); color(RST);
+  color(CYN);
+  printf("%s", pw ? pw->pw_name : "?");
+  color(BLD_CYN);
+  printf("@%s", hn);
+  color(RST);
 }
 
 static void pr_cwd(void) {
   char cwd[PATH_MAX_LEN];
-  if (!getcwd(cwd, sizeof(cwd))) return;
+  if (!getcwd(cwd, sizeof(cwd)))
+    return;
   color(BLD_YEL);
   const char *h = getenv("HOME");
-  if (h && strncmp(cwd, h, strlen(h)) == 0) printf("~%s", cwd + strlen(h));
-  else printf("%s", cwd);
+  if (h && strncmp(cwd, h, strlen(h)) == 0)
+    printf("~%s", cwd + strlen(h));
+  else
+    printf("%s", cwd);
   color(RST);
 }
 
 static void pr_time(void) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
-  if (!t) { color(WHT); printf("--:--:--"); color(RST); return; }
-  color(WHT); printf("%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec); color(RST);
+  if (!t) {
+    color(WHT);
+    printf("--:--:--");
+    color(RST);
+    return;
+  }
+  color(WHT);
+  printf("%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
+  color(RST);
 }
 
 static void pr_prompt(void) {
-  if (g_mode != MODE_BASH) return;
-  pr_time(); printf(" ");
-  if (g_exit_code) { color(BLD_RED); printf("%d ", g_exit_code); }
+  if (g_mode != MODE_BASH)
+    return;
+  pr_time();
+  printf(" ");
+  if (g_exit_code) {
+    color(BLD_RED);
+    printf("%d ", g_exit_code);
+  }
   color(geteuid() == 0 ? BLD_RED : RST);
   printf("%c", geteuid() == 0 ? '#' : '$');
-  color(RST); printf(" ");
+  color(RST);
+  printf(" ");
 }
 
 static int parse_int(const char *s) {
   char *end;
   long val = strtol(s, &end, 10);
-  if (*end != '\0' || val < 0 || val > INT_MAX) return 0;
+  if (*end != '\0' || val < 0 || val > INT_MAX)
+    return 0;
   return (int)val;
 }
 
@@ -808,23 +1026,41 @@ static void usage(const char *prog) {
 static void parse_args(int argc, char **argv) {
   const char *prog = strrchr(argv[0], '/');
   prog = prog ? prog + 1 : argv[0];
-  if (strcmp(prog, "bashline") == 0) { g_mode = MODE_BASH; g_fmt = FMT_PS1; }
+  if (strcmp(prog, "bashline") == 0) {
+    g_mode = MODE_BASH;
+    g_fmt = FMT_PS1;
+  }
   const char *em = getenv("STATUSLINE_MODE");
   if (em) {
-    if (strcmp(em, "bash") == 0) g_mode = MODE_BASH;
-    else if (strcmp(em, "claude") == 0) g_mode = MODE_CLAUDE;
+    if (strcmp(em, "bash") == 0)
+      g_mode = MODE_BASH;
+    else if (strcmp(em, "claude") == 0)
+      g_mode = MODE_CLAUDE;
   }
   const char *es = getenv("SHLVL");
-  if (es) g_shlvl = parse_int(es);
+  if (es)
+    g_shlvl = parse_int(es);
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--bash") == 0) g_mode = MODE_BASH;
-    else if (strcmp(argv[i], "--claude") == 0) g_mode = MODE_CLAUDE;
-    else if (strcmp(argv[i], "--ps1") == 0) g_fmt = FMT_PS1;
-    else if (strncmp(argv[i], "--exit-code=", 12) == 0) g_exit_code = parse_int(argv[i] + 12);
-    else if (strncmp(argv[i], "--jobs=", 7) == 0) g_jobs = parse_int(argv[i] + 7);
-    else if (strncmp(argv[i], "--shlvl=", 8) == 0) g_shlvl = parse_int(argv[i] + 8);
-    else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { usage(argv[0]); exit(0); }
-    else if (strcmp(argv[i], "-V") == 0 || strcmp(argv[i], "--version") == 0) { printf("statusline %s\n", VERSION); exit(0); }
+    if (strcmp(argv[i], "--bash") == 0)
+      g_mode = MODE_BASH;
+    else if (strcmp(argv[i], "--claude") == 0)
+      g_mode = MODE_CLAUDE;
+    else if (strcmp(argv[i], "--ps1") == 0)
+      g_fmt = FMT_PS1;
+    else if (strncmp(argv[i], "--exit-code=", 12) == 0)
+      g_exit_code = parse_int(argv[i] + 12);
+    else if (strncmp(argv[i], "--jobs=", 7) == 0)
+      g_jobs = parse_int(argv[i] + 7);
+    else if (strncmp(argv[i], "--shlvl=", 8) == 0)
+      g_shlvl = parse_int(argv[i] + 8);
+    else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+      usage(argv[0]);
+      exit(0);
+    } else if (strcmp(argv[i], "-V") == 0 ||
+               strcmp(argv[i], "--version") == 0) {
+      printf("statusline %s\n", VERSION);
+      exit(0);
+    }
   }
 }
 
@@ -832,22 +1068,40 @@ int main(int argc, char **argv) {
   const char *tmp = getenv("TMPDIR");
   snprintf(g_cache_path, sizeof(g_cache_path), "%s/.statusline_cache_%u",
            tmp ? tmp : "/tmp", (unsigned)getuid());
-  if (getenv("NO_COLOR")) g_no_color = 1;
+  if (getenv("NO_COLOR"))
+    g_no_color = 1;
   parse_args(argc, argv);
   read_stdin();
 
   if (g_mode == MODE_CLAUDE) {
-    pr_claude_info(); pr_block_time();
-    pr_userhost(); printf(":"); pr_cwd(); printf(" ");
-    pr_git(); pr_k8s(); pr_time();
+    pr_claude_info();
+    pr_block_time();
+    pr_userhost();
+    printf(":");
+    pr_cwd();
+    printf(" ");
+    pr_git();
+    pr_k8s();
+    pr_time();
   } else {
     printf("\n");
-    pr_venv(); pr_ssh();
-    pr_userhost(); printf(":"); pr_cwd(); printf(" ");
-    pr_git(); pr_k8s();
-    if (g_jobs > 0) { color(YEL); printf("[%d job%s]", g_jobs, g_jobs > 1 ? "s" : ""); color(RST); printf(" "); }
+    pr_venv();
+    pr_ssh();
+    pr_userhost();
+    printf(":");
+    pr_cwd();
+    printf(" ");
+    pr_git();
+    pr_k8s();
+    if (g_jobs > 0) {
+      color(YEL);
+      printf("[%d job%s]", g_jobs, g_jobs > 1 ? "s" : "");
+      color(RST);
+      printf(" ");
+    }
     pr_shlvl();
-    printf("\n"); pr_prompt();
+    printf("\n");
+    pr_prompt();
   }
   fflush(stdout);
   return 0;
