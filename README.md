@@ -84,11 +84,12 @@ HH:MM:SS N $
 
 ## Features
 
-- Git branch from `.git/HEAD`, dirty detection via file mtime heuristics
+- Git branch from `.git/HEAD`; dirty detection by spawning `git diff-index --quiet HEAD --`
+- In-progress merge/rebase/cherry-pick/revert/bisect detected via `.git/*_HEAD` files (no spawn)
+- Stash indicator from `.git/refs/stash`
 - K8s context/namespace from `$KUBECONFIG` or `~/.kube/config`
 - Claude 5-hour block time tracking (cached 60s)
 - Virtualenv, SSH indicator, shell level (bash mode)
-- No subprocess spawning for speed
 - Respects `NO_COLOR` environment variable
 
 ## Environment Variables
@@ -103,7 +104,9 @@ HH:MM:SS N $
 
 ## Platform Support
 
-- **macOS**: Native support, uses `timegm()` for UTC parsing
-- **Linux**: Requires glibc; uses TZ manipulation for UTC parsing
-- **BSD**: Should work (uses POSIX APIs)
-- **Windows**: Not supported (requires POSIX APIs)
+Any POSIX system with `posix_spawn`. Tested on macOS (arm64) and Linux (glibc, x86_64). UTC timestamps are parsed with inline calendar arithmetic, with no dependency on `timegm` or `TZ` manipulation.
+
+- **macOS**: Supported
+- **Linux**: Supported
+- **BSD**: Should work
+- **Windows**: Not supported

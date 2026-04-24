@@ -1,6 +1,10 @@
 #!/bin/bash
 # Basic tests for statusline
 
+# Isolate from the user's global git config so throwaway test repos
+# can commit without hitting commit.gpgsign / signing-key prompts.
+export GIT_CONFIG_GLOBAL=/dev/null
+
 PASS=0
 FAIL=0
 
@@ -83,7 +87,7 @@ setup_repo() {
   git init -q
   git config user.email "test@test"
   git config user.name "Test"
-  echo "hello" >file.txt
+  echo "hello" > file.txt
   git add file.txt
   git commit -q -m "initial"
   echo "$d"
@@ -108,7 +112,7 @@ cleanup_repo "$TMPD"
 # Test 9: Modified tracked file detected as dirty
 TMPD=$(setup_repo)
 cd "$TMPD"
-echo "modified" >file.txt
+echo "modified" > file.txt
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
 if echo "$OUT" | grep -q '\*'; then
   pass "modified file detected as dirty"
@@ -144,7 +148,7 @@ cleanup_repo "$TMPD"
 # Test 12: Staged-only change detected as dirty
 TMPD=$(setup_repo)
 cd "$TMPD"
-echo "staged" >file.txt
+echo "staged" > file.txt
 git add file.txt
 sleep 1
 touch .git/index
@@ -159,7 +163,7 @@ cleanup_repo "$TMPD"
 # Test 13: Stash indicator displayed
 TMPD=$(setup_repo)
 cd "$TMPD"
-echo "stash me" >file.txt
+echo "stash me" > file.txt
 git stash -q
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
 if echo "$OUT" | grep -qF '$'; then
@@ -186,10 +190,10 @@ cleanup_repo "$TMPD"
 # Test 15: Worktree dirty detection
 TMPD=$(setup_repo)
 cd "$TMPD"
-git worktree add -q ../wt-test -b wt-branch 2>/dev/null
+git worktree add -q ../wt-test -b wt-branch 2> /dev/null
 if [ -d "../wt-test" ]; then
   cd "../wt-test"
-  echo "dirty" >file.txt
+  echo "dirty" > file.txt
   OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
   cd "$ORIG_DIR"
   if echo "$OUT" | grep -q '\*'; then

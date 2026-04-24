@@ -885,8 +885,12 @@ static void pr_cwd(void) {
     return;
   color(BLD_YEL);
   const char *h = getenv("HOME");
-  if (h && strncmp(cwd, h, strlen(h)) == 0)
-    printf("~%s", cwd + strlen(h));
+  size_t hl = h ? strlen(h) : 0;
+  // Only abbreviate HOME when it's a full-path-component prefix of cwd,
+  // so HOME=/Users/weldon doesn't match cwd=/Users/weldon2.
+  if (h && hl > 0 && strncmp(cwd, h, hl) == 0 &&
+      (cwd[hl] == '\0' || cwd[hl] == '/'))
+    printf("~%s", cwd + hl);
   else
     printf("%s", cwd);
   color(RST);
