@@ -5,15 +5,18 @@
 #define VERSION "unknown"
 #endif
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pwd.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -696,21 +699,16 @@ static int find_git(char *gitdir, char *worktree, size_t sz) {
   return 0;
 }
 
-static uint32_t read_be32(const unsigned char *p) {
-  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-         ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
+extern char **environ;
 
-// Dirty detection by parsing git index binary and comparing stat data.
-// Phase 1: Check for in-progress operations (merge, rebase, etc.)
-// Phase 2: Parse index entries, lstat each file, compare mtime/size/mode
-// Phase 3: Detect staged-but-uncommitted changes via index vs ref mtime
-#define GIT_INDEX_MAX_ENTRIES 2000
-
+// Dirty detection:
+// Phase 1: in-progress operations (merge, rebase, etc.) via access()
+// Phase 2: spawn `git diff-index --quiet HEAD --` and use its exit code.
+// Exit 0 = clean, 1 = dirty, anything else (e.g. 128 on unborn HEAD) is
+// treated as not-dirty so we never show a spurious star.
 static int git_dirty(const char *gitdir, const char *worktree) {
   char path[PATH_MAX_LEN];
 
-  // Phase 1: Check for in-progress operations
   const char *ops[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
                        "REBASE_HEAD", "BISECT_LOG"};
   for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
@@ -718,114 +716,33 @@ static int git_dirty(const char *gitdir, const char *worktree) {
       return 1;
   }
 
-  // Phase 2: Parse git index and compare against filesystem
-  if (!pathcat(path, sizeof(path), gitdir, "index"))
+  posix_spawn_file_actions_t fa;
+  if (posix_spawn_file_actions_init(&fa) != 0)
     return 0;
-  int fd = open(path, O_RDONLY);
-  if (fd < 0)
-    return 0;
-
-  struct stat idx_st;
-  if (fstat(fd, &idx_st) != 0) {
-    close(fd);
+  if (posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0) != 0 ||
+      posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0) != 0 ||
+      posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0) != 0) {
+    posix_spawn_file_actions_destroy(&fa);
     return 0;
   }
 
-  unsigned char hdr[12];
-  if (read(fd, hdr, 12) != 12) {
-    close(fd);
+  char *argv[] = {"git",        "-C",      (char *)worktree,
+                  "diff-index", "--quiet", "HEAD",
+                  "--",         NULL};
+  pid_t pid;
+  int rc = posix_spawnp(&pid, "git", &fa, NULL, argv, environ);
+  posix_spawn_file_actions_destroy(&fa);
+  if (rc != 0)
     return 0;
+
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR)
+      return 0;
   }
-  if (memcmp(hdr, "DIRC", 4) != 0) {
-    close(fd);
+  if (!WIFEXITED(status))
     return 0;
-  }
-  uint32_t version = read_be32(hdr + 4);
-  if (version < 2 || version > 3) {
-    close(fd);
-    return 0;
-  }
-  uint32_t nentries = read_be32(hdr + 8);
-  if (nentries > GIT_INDEX_MAX_ENTRIES)
-    nentries = GIT_INDEX_MAX_ENTRIES;
-
-  size_t datasz = (size_t)(idx_st.st_size - 12);
-  if (datasz > 4 * 1024 * 1024) {
-    close(fd);
-    return 0;
-  }
-  unsigned char *data = malloc(datasz);
-  if (!data) {
-    close(fd);
-    return 0;
-  }
-  if (read(fd, data, datasz) != (ssize_t)datasz) {
-    free(data);
-    close(fd);
-    return 0;
-  }
-  close(fd);
-
-  int dirty = 0;
-  size_t pos = 0;
-
-  for (uint32_t i = 0; i < nentries && !dirty; i++) {
-    if (pos + 62 > datasz)
-      break;
-    const unsigned char *e = data + pos;
-    uint32_t stored_mtime = read_be32(e + 8);
-    uint32_t stored_mode = read_be32(e + 24);
-    uint32_t stored_size = read_be32(e + 36);
-    uint16_t flags = ((uint16_t)e[60] << 8) | e[61];
-
-    size_t name_off = 62;
-    if (version >= 3 && (flags & 0x4000))
-      name_off = 64;
-    if (pos + name_off >= datasz)
-      break;
-
-    uint16_t flaglen = flags & 0x0FFF;
-    size_t namelen;
-    if (flaglen < 0x0FFF) {
-      namelen = flaglen;
-    } else {
-      const unsigned char *nul =
-          memchr(e + name_off, 0, datasz - pos - name_off);
-      if (!nul)
-        break;
-      namelen = (size_t)(nul - (e + name_off));
-    }
-
-    size_t entry_size = (name_off + namelen + 8) & ~(size_t)7;
-
-    char fpath[PATH_MAX_LEN];
-    int n = snprintf(fpath, sizeof(fpath), "%s/%.*s", worktree, (int)namelen,
-                     (const char *)(e + name_off));
-    if (n < 0 || (size_t)n >= sizeof(fpath)) {
-      pos += entry_size;
-      continue;
-    }
-
-    struct stat st;
-    if (lstat(fpath, &st) != 0) {
-      dirty = 1;
-    } else {
-      if (st.st_mtime != (time_t)stored_mtime)
-        dirty = 1;
-      else if (S_ISREG(st.st_mode) && st.st_size != (off_t)stored_size)
-        dirty = 1;
-      else {
-        int idx_exec = (stored_mode & 0111) != 0;
-        int fs_exec = (st.st_mode & 0111) != 0;
-        if (idx_exec != fs_exec)
-          dirty = 1;
-      }
-    }
-    pos += entry_size;
-  }
-
-  free(data);
-  return dirty;
+  return WEXITSTATUS(status) == 1;
 }
 
 static int git_has_stash(const char *gitdir) {
