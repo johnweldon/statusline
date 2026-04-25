@@ -4,7 +4,7 @@
 #ifndef VERSION
 #define VERSION "unknown"
 #endif
-#include <dirent.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -14,49 +14,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-#define BLOCK_HOURS 5
-#define CACHE_TTL_SECS 60
+#define JSMN_STATIC
+#define JSMN_PARENT_LINKS
+#include "jsmn.h"
+
 #define BUF_SIZE 65536
 #define PATH_MAX_LEN 4096
-#define MAX_FILES_CHECK 200
-
-#define JSONL_EXT ".jsonl"
-#define JSONL_EXT_LEN 6
-#define TS_PREFIX "\"timestamp\":\""
-#define USAGE_PREFIX "\"usage\":{"
+#define MAX_TOKENS 256
 #define GIT_REF_PREFIX "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
-
-typedef struct {
-  time_t start;
-  long tokens;
-} block_info_t;
-
-typedef struct {
-  char path[PATH_MAX_LEN];
-  time_t mtime;
-} file_entry_t;
-
-static int cmp_file_mtime_desc(const void *a, const void *b) {
-  const file_entry_t *fa = a, *fb = b;
-  if (fb->mtime > fa->mtime)
-    return 1;
-  if (fb->mtime < fa->mtime)
-    return -1;
-  return 0;
-}
 
 enum { MODE_CLAUDE, MODE_BASH };
 enum { FMT_RAW, FMT_PS1 };
 
 static char g_input[BUF_SIZE];
-static char g_cache_path[PATH_MAX_LEN];
 static int g_mode = MODE_CLAUDE;
 static int g_fmt = FMT_RAW;
 static int g_no_color = 0;
@@ -66,17 +42,22 @@ static int g_shlvl = 0;
 
 // Colors
 #define RST "\033[0m"
-#define MAG "\033[1;35m"
-#define BLU "\033[1;34m"
-#define DIM_BLU "\033[0;34m"
-#define CYN "\033[0;36m"
-#define BLD_CYN "\033[1;36m"
+#define DIM "\033[2m"
 #define RED "\033[0;31m"
 #define BLD_RED "\033[1;31m"
+#define RED_F "\033[31m"
+#define GRN_F "\033[32m"
+#define YEL_F "\033[33m"
 #define YEL "\033[0;33m"
 #define BLD_YEL "\033[1;33m"
 #define GRN "\033[1;32m"
 #define DIM_GRN "\033[0;32m"
+#define CYN_F "\033[36m"
+#define CYN "\033[0;36m"
+#define BLD_CYN "\033[1;36m"
+#define BRIGHT_BLU "\033[94m"
+#define BRIGHT_CYN "\033[96m"
+#define WHT_F "\033[37m"
 #define WHT "\033[0;37m"
 #define BLD_WHT "\033[1;37m"
 
@@ -89,120 +70,91 @@ static void color(const char *c) {
     printf("%s", c);
 }
 
-// Safe path construction - returns 1 on success
 static int pathcat(char *out, size_t sz, const char *a, const char *b) {
   int n = snprintf(out, sz, "%s/%s", a, b);
   return n >= 0 && (size_t)n < sz;
 }
 
-// Extract quoted value after prefix into out, returns length or 0
-static size_t extract_quoted(const char *s, const char *prefix, char *out,
-                             size_t sz) {
-  char *p = strstr(s, prefix);
-  if (!p)
-    return 0;
-  p += strlen(prefix);
-  char *q = strchr(p, '"');
-  if (!q || q <= p)
-    return 0;
-  size_t len = (size_t)(q - p);
-  if (len >= sz)
-    return 0;
-  memcpy(out, p, len);
-  out[len] = '\0';
-  return len;
+// ==================== JSON path helpers (over jsmn) ====================
+
+// Find a token by dot-separated path (e.g. "model.display_name").
+// Returns the value-token index, or -1 if any segment is missing.
+static int jp_find(const char *buf, jsmntok_t *t, int n, const char *path) {
+  if (n <= 0)
+    return -1;
+  int cur = 0;
+  const char *p = path;
+  while (*p) {
+    const char *seg = p;
+    while (*p && *p != '.')
+      p++;
+    size_t seglen = (size_t)(p - seg);
+
+    if (t[cur].type != JSMN_OBJECT)
+      return -1;
+    int found = -1;
+    for (int i = cur + 1; i < n; i++) {
+      if (t[i].parent == cur && t[i].type == JSMN_STRING) {
+        size_t klen = (size_t)(t[i].end - t[i].start);
+        if (klen == seglen && strncmp(buf + t[i].start, seg, seglen) == 0) {
+          found = i + 1;
+          break;
+        }
+      }
+    }
+    if (found < 0)
+      return -1;
+    cur = found;
+    if (*p == '.')
+      p++;
+  }
+  return cur;
 }
 
-// JSON helpers
-static int json_str(const char *json, const char *key, char *out, size_t sz) {
-  char pat[256];
-  snprintf(pat, sizeof(pat), "\"%s\":\"", key);
-  const char *s = strstr(json, pat);
-  if (!s)
+static int jp_is_null(const char *buf, jsmntok_t *tok) {
+  return tok->type == JSMN_PRIMITIVE && (tok->end - tok->start) == 4 &&
+         strncmp(buf + tok->start, "null", 4) == 0;
+}
+
+static int jp_str(const char *buf, jsmntok_t *t, int n, const char *path,
+                  char *out, size_t sz) {
+  int i = jp_find(buf, t, n, path);
+  if (i < 0 || t[i].type != JSMN_STRING)
     return 0;
-  s += strlen(pat);
-  const char *e = strchr(s, '"');
-  if (!e)
-    return 0;
-  size_t n = (size_t)(e - s);
-  if (n >= sz)
-    n = sz - 1;
-  memcpy(out, s, n);
-  out[n] = '\0';
+  size_t len = (size_t)(t[i].end - t[i].start);
+  if (len >= sz)
+    len = sz - 1;
+  memcpy(out, buf + t[i].start, len);
+  out[len] = '\0';
   return 1;
 }
 
-static long json_long(const char *json, const char *key) {
-  char pat[256];
-  snprintf(pat, sizeof(pat), "\"%s\":", key);
-  const char *s = strstr(json, pat);
-  if (!s)
-    return -1;
-  s += strlen(pat);
-  while (*s == ' ' || *s == '\t')
-    s++;
-  if (*s == '"')
-    return -1;
-  return strtol(s, NULL, 10);
+static long jp_long(const char *buf, jsmntok_t *t, int n, const char *path,
+                    long dflt) {
+  int i = jp_find(buf, t, n, path);
+  if (i < 0 || t[i].type != JSMN_PRIMITIVE || jp_is_null(buf, &t[i]))
+    return dflt;
+  char *endp;
+  long v = strtol(buf + t[i].start, &endp, 10);
+  if (endp == buf + t[i].start)
+    return dflt;
+  return v;
 }
 
-// Fast ISO 8601 UTC timestamp parser using direct character arithmetic
-// Format: YYYY-MM-DDTHH:MM:SS (Z suffix ignored, assumes UTC)
-// ~5x faster than sscanf + timegm by avoiding format string parsing and
-// syscalls
-static time_t parse_iso(const char *ts) {
-  // Quick validation: minimum length "YYYY-MM-DDTHH:MM:SS" = 19 chars
-  if (!ts || strlen(ts) < 19)
-    return 0;
-
-// Parse digits directly - each digit pair: (c[0]-'0')*10 + (c[1]-'0')
-#define D2(p) ((ts[p] - '0') * 10 + ts[p + 1] - '0')
-#define D4(p)                                                                  \
-  ((ts[p] - '0') * 1000 + (ts[p + 1] - '0') * 100 + (ts[p + 2] - '0') * 10 +   \
-   ts[p + 3] - '0')
-
-  int y = D4(0);   // YYYY at pos 0-3
-  int mo = D2(5);  // MM at pos 5-6
-  int d = D2(8);   // DD at pos 8-9
-  int h = D2(11);  // HH at pos 11-12
-  int mi = D2(14); // MM at pos 14-15
-  int se = D2(17); // SS at pos 17-18
-
-#undef D2
-#undef D4
-
-  // Basic validation
-  if (y < 1970 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 ||
-      mi > 59 || se > 59)
-    return 0;
-
-  // Days in each month (non-leap year)
-  static const int mdays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-
-  // Calculate days since Unix epoch (Jan 1, 1970)
-  // Years contribution: count leap years from 1970 to y-1
-  int years = y - 1970;
-  int leap_years = (y - 1) / 4 - 1969 / 4 - ((y - 1) / 100 - 1969 / 100) +
-                   ((y - 1) / 400 - 1969 / 400);
-  long days = years * 365L + leap_years;
-
-  // Months contribution
-  for (int i = 0; i < mo - 1; i++)
-    days += mdays[i];
-
-  // Add Feb 29 if current year is leap and we're past February
-  int is_leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
-  if (is_leap && mo > 2)
-    days++;
-
-  // Days contribution (1-indexed, so subtract 1)
-  days += d - 1;
-
-  // Convert to seconds and add time
-  return days * 86400L + h * 3600L + mi * 60L + se;
+static double jp_dbl(const char *buf, jsmntok_t *t, int n, const char *path,
+                     double dflt) {
+  int i = jp_find(buf, t, n, path);
+  if (i < 0 || t[i].type != JSMN_PRIMITIVE || jp_is_null(buf, &t[i]))
+    return dflt;
+  char *endp;
+  double v = strtod(buf + t[i].start, &endp);
+  if (endp == buf + t[i].start)
+    return dflt;
+  return v;
 }
 
-// Read stdin for claude mode
+// ==================== stdin ====================
+
 static void read_stdin(void) {
   if (g_mode != MODE_CLAUDE || isatty(STDIN_FILENO))
     return;
@@ -218,408 +170,8 @@ static void read_stdin(void) {
   g_input[total] = '\0';
 }
 
-// Claude: model and context info
-static void pr_claude_info(void) {
-  if (g_mode != MODE_CLAUDE)
-    return;
-  char model[128] = "Unknown";
-  json_str(g_input, "display_name", model, sizeof(model));
-  long in = json_long(g_input, "input_tokens");
-  long cw = json_long(g_input, "cache_creation_input_tokens");
-  long cr = json_long(g_input, "cache_read_input_tokens");
-  long win = json_long(g_input, "context_window_size");
+// ==================== bash-mode env blocks ====================
 
-  color(MAG);
-  printf("[%s]", model);
-  color(RST);
-  printf(" ");
-  if (in >= 0) {
-    // Safe addition with overflow check before each operation
-    long cur = in;
-    if (cw > 0) {
-      if (cur > LONG_MAX - cw)
-        cur = LONG_MAX;
-      else
-        cur += cw;
-    }
-    if (cr > 0) {
-      if (cur > LONG_MAX - cr)
-        cur = LONG_MAX;
-      else
-        cur += cr;
-    }
-    if (win > 0) {
-      long pct = (cur >= win)
-                     ? 100
-                     : (win >= 100 ? cur / (win / 100) : cur * 100 / win);
-      color(BLU);
-      printf("%ld%%", pct);
-      color(RST);
-      printf(" ");
-      color(DIM_BLU);
-      printf("(%ld/%ld)", cur, win);
-      color(RST);
-      printf(" ");
-    } else {
-      // Show token count even without context window size
-      color(DIM_BLU);
-      printf("(%ld)", cur);
-      color(RST);
-      printf(" ");
-    }
-    if (cr > 0 || cw > 0) {
-      color(CYN);
-      printf("[cache: r:%ld w:%ld]", cr > 0 ? cr : 0, cw > 0 ? cw : 0);
-      color(RST);
-      printf(" ");
-    }
-  }
-}
-
-// Extract token counts from usage JSON
-static long extract_tokens(const char *line) {
-  char *u = strstr(line, USAGE_PREFIX);
-  if (!u)
-    return 0;
-  long total = 0;
-  // Parse input_tokens, output_tokens, cache_creation_input_tokens,
-  // cache_read_input_tokens
-  const char *keys[] = {"input_tokens", "output_tokens",
-                        "cache_creation_input_tokens",
-                        "cache_read_input_tokens"};
-  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-    long v = json_long(u, keys[i]);
-    if (v > 0) {
-      if (total > LONG_MAX - v)
-        return LONG_MAX; // Saturate on overflow
-      total += v;
-    }
-  }
-  return total;
-}
-
-// Simple hash set for message ID deduplication (open addressing)
-#define MSG_ID_HASH_SIZE 512
-typedef struct {
-  char ids[MSG_ID_HASH_SIZE][64];
-  int count;
-} msg_id_set_t;
-
-static unsigned hash_str(const char *s) {
-  unsigned h = 5381;
-  while (*s)
-    h = ((h << 5) + h) ^ (unsigned char)*s++;
-  return h;
-}
-
-static int msg_id_seen(msg_id_set_t *set, const char *id) {
-  unsigned idx = hash_str(id) % MSG_ID_HASH_SIZE;
-  for (int i = 0; i < MSG_ID_HASH_SIZE; i++) {
-    unsigned slot = (idx + i) % MSG_ID_HASH_SIZE;
-    if (!set->ids[slot][0]) {
-      // Empty slot - not seen, add it
-      snprintf(set->ids[slot], sizeof(set->ids[slot]), "%s", id);
-      set->count++;
-      return 0;
-    }
-    if (strcmp(set->ids[slot], id) == 0)
-      return 1; // Already seen
-  }
-  return 1; // Table full, treat as seen to avoid duplicates
-}
-
-// Process a single JSONL line for block info
-// Returns: 1 = continue processing, 0 = stop (hit pre-cutoff entry)
-static int process_jsonl_line(const char *line, time_t now, time_t cutoff,
-                              block_info_t *info, msg_id_set_t *seen) {
-  char ts[64];
-  if (!extract_quoted(line, TS_PREFIX, ts, sizeof(ts)))
-    return 1;
-
-  time_t line_ts = parse_iso(ts);
-  if (line_ts <= 0)
-    return 1;
-
-  // If timestamp is before cutoff, signal to stop (file is chronological)
-  if (line_ts < cutoff)
-    return 0;
-
-  // Skip future timestamps
-  if (line_ts > now)
-    return 1;
-
-  // Track earliest timestamp in block
-  if (!info->start || line_ts < info->start)
-    info->start = line_ts;
-
-  // Count tokens (deduplicated by message ID)
-  if (strstr(line, USAGE_PREFIX)) {
-    char msg_id[64];
-    if (extract_quoted(line, "\"id\":\"", msg_id, sizeof(msg_id)) &&
-        !msg_id_seen(seen, msg_id)) {
-      long tokens = extract_tokens(line);
-      if (tokens > 0 && info->tokens <= LONG_MAX - tokens)
-        info->tokens += tokens;
-    }
-  }
-  return 1;
-}
-
-// Read file backwards in chunks, process lines from newest to oldest
-// Stops when hitting entries before cutoff (JSONL is chronological)
-#define CHUNK_SIZE 32768
-#define MAX_LINE_LEN 8192
-
-static void process_file_reverse(const char *path, time_t now, time_t cutoff,
-                                 block_info_t *info, msg_id_set_t *seen) {
-  int fd = open(path, O_RDONLY);
-  if (fd < 0)
-    return;
-
-  off_t size = lseek(fd, 0, SEEK_END);
-  if (size <= 0) {
-    close(fd);
-    return;
-  }
-
-  char *buf = malloc(CHUNK_SIZE + MAX_LINE_LEN);
-  if (!buf) {
-    close(fd);
-    return;
-  }
-
-  char *partial = NULL;
-  size_t partial_len = 0;
-  off_t pos = size;
-
-  while (pos > 0) {
-    // Read a chunk ending at current position
-    off_t chunk_start = pos > CHUNK_SIZE ? pos - CHUNK_SIZE : 0;
-    size_t chunk_len = (size_t)(pos - chunk_start);
-    lseek(fd, chunk_start, SEEK_SET);
-
-    if (read(fd, buf, chunk_len) != (ssize_t)chunk_len)
-      break;
-
-    // Append any partial line from previous chunk (with bounds check)
-    if (partial) {
-      if (partial_len <= MAX_LINE_LEN &&
-          chunk_len + partial_len <= CHUNK_SIZE + MAX_LINE_LEN) {
-        memcpy(buf + chunk_len, partial, partial_len);
-        chunk_len += partial_len;
-      }
-      free(partial);
-      partial = NULL;
-      partial_len = 0;
-    }
-
-    // Process lines from end to start of chunk
-    char *end = buf + chunk_len;
-    char *line_end = end;
-
-    while (line_end > buf) {
-      // Find start of current line (scan backwards for newline)
-      char *line_start = line_end - 1;
-      while (line_start > buf && *(line_start - 1) != '\n')
-        line_start--;
-
-      // Null-terminate the line
-      char saved = *line_end;
-      *line_end = '\0';
-
-      // Skip empty lines
-      if (line_start < line_end && *line_start != '\n') {
-        if (!process_jsonl_line(line_start, now, cutoff, info, seen)) {
-          // Hit pre-cutoff entry, done with this file
-          free(buf);
-          close(fd);
-          return;
-        }
-      }
-
-      *line_end = saved;
-      line_end = line_start;
-      if (line_end > buf)
-        line_end--; // Skip the newline
-    }
-
-    // Save incomplete first line for next chunk (content before first newline)
-    // When reading backwards, this fragment completes a line in the previous
-    // chunk
-    if (chunk_start > 0) {
-      char *first_nl = memchr(buf, '\n', end - buf);
-      if (first_nl) {
-        partial_len = (size_t)(first_nl - buf);
-        if (partial_len > 0 && partial_len <= MAX_LINE_LEN) {
-          partial = malloc(partial_len);
-          if (partial)
-            memcpy(partial, buf, partial_len);
-          else
-            partial_len = 0;
-        } else {
-          partial_len = 0; // Skip oversized partial lines
-        }
-      }
-    }
-
-    pos = chunk_start;
-  }
-
-  free(partial);
-  free(buf);
-  close(fd);
-}
-
-// Claude: find block start and count tokens
-// Collects JSONL files, sorts by mtime descending, processes each file
-// backwards
-static block_info_t find_block_info(time_t now) {
-  block_info_t info = {0, 0};
-  const char *home = getenv("HOME");
-  if (!home)
-    return info;
-  char path[PATH_MAX_LEN];
-  if (snprintf(path, sizeof(path), "%s/.claude/projects", home) < 0)
-    return info;
-  DIR *pd = opendir(path);
-  if (!pd)
-    return info;
-
-  time_t cutoff = now - BLOCK_HOURS * 3600;
-  file_entry_t *files = malloc(MAX_FILES_CHECK * sizeof(file_entry_t));
-  if (!files) {
-    closedir(pd);
-    return info;
-  }
-  int nfiles = 0;
-  struct dirent *pe;
-
-  // Phase 1: Collect all eligible JSONL files
-  while ((pe = readdir(pd))) {
-    if (pe->d_name[0] == '.')
-      continue;
-    char ppath[PATH_MAX_LEN];
-    if (!pathcat(ppath, sizeof(ppath), path, pe->d_name))
-      continue;
-    DIR *sd = opendir(ppath);
-    if (!sd)
-      continue;
-    struct dirent *se;
-    while ((se = readdir(sd)) && nfiles < MAX_FILES_CHECK) {
-      size_t len = strlen(se->d_name);
-      if (len < JSONL_EXT_LEN + 1 ||
-          strcmp(se->d_name + len - JSONL_EXT_LEN, JSONL_EXT))
-        continue;
-      char fpath[PATH_MAX_LEN];
-      if (!pathcat(fpath, sizeof(fpath), ppath, se->d_name))
-        continue;
-      struct stat st;
-      if (stat(fpath, &st) || !S_ISREG(st.st_mode) || st.st_mtime < cutoff)
-        continue;
-      snprintf(files[nfiles].path, sizeof(files[nfiles].path), "%s", fpath);
-      files[nfiles].mtime = st.st_mtime;
-      nfiles++;
-    }
-    closedir(sd);
-  }
-  closedir(pd);
-
-  // Phase 2: Sort by mtime descending (newest first)
-  if (nfiles > 1)
-    qsort(files, (size_t)nfiles, sizeof(file_entry_t), cmp_file_mtime_desc);
-
-  // Phase 3: Process files in sorted order, reading backwards
-  msg_id_set_t *seen = calloc(1, sizeof(msg_id_set_t));
-  if (seen) {
-    for (int i = 0; i < nfiles; i++)
-      process_file_reverse(files[i].path, now, cutoff, &info, seen);
-    free(seen);
-  }
-
-  free(files);
-  if (info.start)
-    info.start -= info.start % 3600; // Round to hour
-  return info;
-}
-
-// Format large numbers with K/M suffix
-static void print_tokens(long tokens) {
-  if (tokens >= 1000000)
-    printf("%.1fM", tokens / 1000000.0);
-  else if (tokens >= 1000)
-    printf("%.0fK", tokens / 1000.0);
-  else
-    printf("%ld", tokens);
-}
-
-// Read cache file (assumes fd is open and optionally locked)
-// Returns 1 if valid cache found, 0 otherwise
-static int read_cache(int fd, time_t now, time_t max_age, block_info_t *info) {
-  FILE *c = fdopen(dup(fd), "r");
-  if (!c)
-    return 0;
-  time_t ct;
-  char ver[4] = "";
-  int valid = fscanf(c, "%3[^:]:%ld:%ld:%ld", ver, &ct, &info->start,
-                     &info->tokens) == 4 &&
-              strcmp(ver, "v1") == 0 && ct <= now && now - ct < max_age &&
-              info->start > 0;
-  fclose(c);
-  return valid;
-}
-
-static void pr_block_time(void) {
-  if (g_mode != MODE_CLAUDE)
-    return;
-  time_t now = time(NULL);
-  block_info_t info = {0, 0};
-
-  int fd = open(g_cache_path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600);
-  if (fd < 0)
-    return;
-
-  // Try non-blocking exclusive lock first
-  if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
-    // Got exclusive lock - check cache freshness and update if needed
-    if (!read_cache(fd, now, CACHE_TTL_SECS, &info)) {
-      info = find_block_info(now);
-      if (ftruncate(fd, 0) == 0) {
-        lseek(fd, 0, SEEK_SET);
-        dprintf(fd, "v1:%ld:%ld:%ld", now, info.start, info.tokens);
-      }
-    }
-    flock(fd, LOCK_UN);
-  } else {
-    // Lock contention - another process is updating cache
-    // Try shared lock to read potentially stale data (allow up to 5min stale)
-    if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
-      read_cache(fd, now, CACHE_TTL_SECS * 5, &info);
-      flock(fd, LOCK_UN);
-    }
-    // If shared lock also fails, gracefully degrade (info remains {0,0})
-  }
-  close(fd);
-  if (!info.start)
-    return;
-  long secs = info.start + BLOCK_HOURS * 3600 - now;
-  if (secs <= 0)
-    return;
-  int h = secs / 3600, m = (secs % 3600) / 60;
-  color(YEL);
-  if (h > 0)
-    printf("[%dh %dm", h, m);
-  else
-    printf("[%dm", m);
-  if (info.tokens > 0) {
-    printf(" ");
-    print_tokens(info.tokens);
-  }
-  printf("]");
-  color(RST);
-  printf(" ");
-}
-
-// Bash: virtualenv, ssh, shlvl
 static void pr_venv(void) {
   if (g_mode != MODE_BASH)
     return;
@@ -653,11 +205,17 @@ static void pr_shlvl(void) {
   printf(" ");
 }
 
-// Git
-static int find_git(char *gitdir, char *worktree, size_t sz) {
+// ==================== git ====================
+
+// start==NULL uses getcwd; otherwise searches starting from `start`.
+static int find_git(const char *start, char *gitdir, char *worktree,
+                    size_t sz) {
   char cwd[PATH_MAX_LEN];
-  if (!getcwd(cwd, sizeof(cwd)))
+  if (start) {
+    snprintf(cwd, sizeof(cwd), "%s", start);
+  } else if (!getcwd(cwd, sizeof(cwd))) {
     return 0;
+  }
   while (*cwd) {
     char dotgit[PATH_MAX_LEN];
     if (!pathcat(dotgit, sizeof(dotgit), cwd, ".git"))
@@ -699,23 +257,39 @@ static int find_git(char *gitdir, char *worktree, size_t sz) {
   return 0;
 }
 
+// Fills br with branch name or short SHA; returns 1 on success.
+static int git_branch_name(const char *gitdir, char *br, size_t sz) {
+  char hp[PATH_MAX_LEN];
+  if (!pathcat(hp, sizeof(hp), gitdir, "HEAD"))
+    return 0;
+  FILE *f = fopen(hp, "r");
+  if (!f)
+    return 0;
+  char head[256];
+  if (!fgets(head, sizeof(head), f)) {
+    fclose(f);
+    return 0;
+  }
+  fclose(f);
+  head[strcspn(head, "\n")] = '\0';
+  if (strncmp(head, GIT_REF_PREFIX, GIT_REF_PREFIX_LEN) == 0)
+    snprintf(br, sz, "%s", head + GIT_REF_PREFIX_LEN);
+  else
+    snprintf(br, sz, "%.7s", head);
+  return 1;
+}
+
 extern char **environ;
 
-// Dirty detection:
-// Phase 1: in-progress operations (merge, rebase, etc.) via access()
-// Phase 2: spawn `git diff-index --quiet HEAD --` and use its exit code.
-// Exit 0 = clean, 1 = dirty, anything else (e.g. 128 on unborn HEAD) is
-// treated as not-dirty so we never show a spurious star.
+// Exit 0 = clean, 1 = dirty, anything else = treat as clean.
 static int git_dirty(const char *gitdir, const char *worktree) {
   char path[PATH_MAX_LEN];
-
   const char *ops[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
                        "REBASE_HEAD", "BISECT_LOG"};
   for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
     if (pathcat(path, sizeof(path), gitdir, ops[i]) && access(path, F_OK) == 0)
       return 1;
   }
-
   posix_spawn_file_actions_t fa;
   if (posix_spawn_file_actions_init(&fa) != 0)
     return 0;
@@ -725,7 +299,6 @@ static int git_dirty(const char *gitdir, const char *worktree) {
     posix_spawn_file_actions_destroy(&fa);
     return 0;
   }
-
   char *argv[] = {"git",        "-C",      (char *)worktree,
                   "diff-index", "--quiet", "HEAD",
                   "--",         NULL};
@@ -734,7 +307,6 @@ static int git_dirty(const char *gitdir, const char *worktree) {
   posix_spawn_file_actions_destroy(&fa);
   if (rc != 0)
     return 0;
-
   int status = 0;
   while (waitpid(pid, &status, 0) < 0) {
     if (errno != EINTR)
@@ -751,28 +323,14 @@ static int git_has_stash(const char *gitdir) {
          access(path, F_OK) == 0;
 }
 
+// Bash-mode git block: (branch) [*] [$]
 static void pr_git(void) {
   char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
-  if (!find_git(gd, wt, sizeof(gd)))
+  if (!find_git(NULL, gd, wt, sizeof(gd)))
     return;
-  char hp[PATH_MAX_LEN];
-  if (!pathcat(hp, sizeof(hp), gd, "HEAD"))
-    return;
-  FILE *f = fopen(hp, "r");
-  if (!f)
-    return;
-  char head[256];
-  if (!fgets(head, sizeof(head), f)) {
-    fclose(f);
-    return;
-  }
-  fclose(f);
-  head[strcspn(head, "\n")] = '\0';
   char br[256];
-  if (strncmp(head, GIT_REF_PREFIX, GIT_REF_PREFIX_LEN) == 0)
-    snprintf(br, sizeof(br), "%s", head + GIT_REF_PREFIX_LEN);
-  else
-    snprintf(br, sizeof(br), "%.7s", head);
+  if (!git_branch_name(gd, br, sizeof(br)))
+    return;
   color(RED);
   printf("(%s)", br);
   color(RST);
@@ -789,8 +347,9 @@ static void pr_git(void) {
   printf(" ");
 }
 
-// K8s - minimal YAML parser for kubeconfig.
-// Assumes standard kubectl formatting; no support for anchors or complex YAML.
+// ==================== k8s ====================
+// Minimal YAML parser for kubeconfig; assumes standard kubectl formatting.
+
 static void pr_k8s(void) {
   char kc[PATH_MAX_LEN];
   const char *e = getenv("KUBECONFIG");
@@ -862,7 +421,8 @@ static void pr_k8s(void) {
   printf(" ");
 }
 
-// Common
+// ==================== common (bash-mode) ====================
+
 static void pr_userhost(void) {
   char hn[256] = "unknown";
   if (gethostname(hn, sizeof(hn)) != 0)
@@ -925,6 +485,232 @@ static void pr_prompt(void) {
   printf(" ");
 }
 
+// ==================== Claude mode ====================
+
+// Strip leading "Claude " prefix if present; else return input.
+static const char *short_model(const char *full) {
+  if (strncmp(full, "Claude ", 7) == 0)
+    return full + 7;
+  return full;
+}
+
+// "1h2m" / "2m3s" / "5s". Empty string for ms <= 0.
+static void fmt_duration_ms(char *out, size_t sz, long ms) {
+  if (ms <= 0) {
+    out[0] = '\0';
+    return;
+  }
+  long total_sec = ms / 1000;
+  long hours = total_sec / 3600;
+  long minutes = (total_sec % 3600) / 60;
+  long seconds = total_sec % 60;
+  if (hours > 0)
+    snprintf(out, sz, "%ldh%ldm", hours, minutes);
+  else if (minutes > 0)
+    snprintf(out, sz, "%ldm%lds", minutes, seconds);
+  else
+    snprintf(out, sz, "%lds", seconds);
+}
+
+// 12-char progress bar colored by usage threshold.
+static void pr_progress_bar(int pct) {
+  if (pct < 0)
+    pct = 0;
+  if (pct > 100)
+    pct = 100;
+  const int width = 12;
+  int filled = pct * width / 100;
+  int empty = width - filled;
+  const char *fill_color = (pct < 50) ? GRN_F : (pct < 80) ? YEL_F : RED_F;
+  color(fill_color);
+  for (int i = 0; i < filled; i++)
+    fputs("\xE2\x96\x88", stdout); // U+2588 FULL BLOCK
+  color(DIM);
+  for (int i = 0; i < empty; i++)
+    fputs("\xE2\xA3\xBF", stdout); // U+28FF BRAILLE PATTERN DOTS-12345678
+  color(RST);
+}
+
+static const char *path_basename(const char *p) {
+  size_t len = strlen(p);
+  while (len > 1 && p[len - 1] == '/')
+    len--;
+  const char *s = p;
+  for (size_t i = 0; i < len; i++)
+    if (p[i] == '/')
+      s = p + i + 1;
+  return s;
+}
+
+static void pr_sep(void) {
+  color(DIM);
+  printf("|");
+  color(RST);
+}
+
+// Line 1: [Model] 📁 folder | 🌿 branch
+static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
+  char model[256];
+  if (!jp_str(buf, t, n, "model.display_name", model, sizeof(model)))
+    snprintf(model, sizeof(model), "Unknown");
+  color(WHT_F);
+  printf("[%s]", short_model(model));
+  color(RST);
+
+  char cur_dir[PATH_MAX_LEN] = "";
+  if (!jp_str(buf, t, n, "workspace.current_dir", cur_dir, sizeof(cur_dir)))
+    jp_str(buf, t, n, "cwd", cur_dir, sizeof(cur_dir));
+  if (cur_dir[0]) {
+    printf(" ");
+    color(BRIGHT_BLU);
+    printf("\xF0\x9F\x93\x81 %s", path_basename(cur_dir)); // U+1F4C1 FOLDER
+    color(RST);
+
+    char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
+    if (find_git(cur_dir, gd, wt, sizeof(gd))) {
+      char br[256];
+      if (git_branch_name(gd, br, sizeof(br))) {
+        printf(" ");
+        pr_sep();
+        printf(" ");
+        color(BRIGHT_CYN);
+        printf("\xF0\x9F\x8C\xBF %s", br); // U+1F33F HERB
+        color(RST);
+      }
+    }
+  }
+}
+
+// Line 2: bar N% | $cost | +a/-r | 5h:N% | ⏱ api/total ↻cache%
+static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
+  int any = 0;
+
+  // Context usage: prefer the direct field, fall back to 100 - remaining.
+  long ctx = jp_long(buf, t, n, "context_window.used_percentage", -1);
+  if (ctx < 0) {
+    long rem = jp_long(buf, t, n, "context_window.remaining_percentage", -1);
+    if (rem >= 0)
+      ctx = 100 - rem;
+  }
+  if (ctx >= 0) {
+    pr_progress_bar((int)ctx);
+    printf(" ");
+    color(WHT_F);
+    printf("%ld%%", ctx);
+    color(RST);
+    any = 1;
+  }
+
+  // Cost (always shown when present).
+  double cost = jp_dbl(buf, t, n, "cost.total_cost_usd", -1.0);
+  if (cost >= 0) {
+    if (any) {
+      printf(" ");
+      pr_sep();
+      printf(" ");
+    }
+    color(YEL_F);
+    printf("$%.2f", cost);
+    color(RST);
+    any = 1;
+  }
+
+  // Lines added / removed.
+  long added = jp_long(buf, t, n, "cost.total_lines_added", 0);
+  long removed = jp_long(buf, t, n, "cost.total_lines_removed", 0);
+  if (added > 0 || removed > 0) {
+    if (any) {
+      printf(" ");
+      pr_sep();
+      printf(" ");
+    }
+    color(GRN_F);
+    printf("+%ld", added);
+    color(RST);
+    printf("/");
+    color(RED_F);
+    printf("-%ld", removed);
+    color(RST);
+    any = 1;
+  }
+
+  // 5-hour rate limit. Value may be integer or float; cast to long via dbl.
+  int ri = jp_find(buf, t, n, "rate_limits.five_hour.used_percentage");
+  if (ri >= 0 && t[ri].type == JSMN_PRIMITIVE && !jp_is_null(buf, &t[ri])) {
+    char *endp;
+    double rv = strtod(buf + t[ri].start, &endp);
+    if (endp != buf + t[ri].start) {
+      long rate = (long)rv;
+      if (any) {
+        printf(" ");
+        pr_sep();
+        printf(" ");
+      }
+      const char *rc = (rate < 50) ? GRN_F : (rate < 80) ? YEL_F : RED_F;
+      color(rc);
+      printf("5h:%ld%%", rate);
+      color(RST);
+      any = 1;
+    }
+  }
+
+  // Duration (api / total).
+  long api_ms = jp_long(buf, t, n, "cost.total_api_duration_ms", 0);
+  long tot_ms = jp_long(buf, t, n, "cost.total_duration_ms", 0);
+  char api_s[32], tot_s[32];
+  fmt_duration_ms(api_s, sizeof(api_s), api_ms);
+  fmt_duration_ms(tot_s, sizeof(tot_s), tot_ms);
+  if (tot_s[0]) {
+    if (any) {
+      printf(" ");
+      pr_sep();
+      printf(" ");
+    }
+    color(CYN_F);
+    if (api_s[0])
+      printf("\xE2\x8F\xB1 %s/%s", api_s, tot_s); // U+23F1 STOPWATCH
+    else
+      printf("\xE2\x8F\xB1 %s", tot_s);
+    color(RST);
+    any = 1;
+  }
+
+  // Cache hit rate: read / (input + read).
+  long in_tok =
+      jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0);
+  long cr_tok = jp_long(
+      buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0);
+  long denom = in_tok + cr_tok;
+  if (denom > 0) {
+    long cache_pct = cr_tok * 100 / denom;
+    if (cache_pct > 0) {
+      printf(" ");
+      color(DIM);
+      printf("\xE2\x86\xBB%ld%%", cache_pct); // U+21BB CLOCKWISE OPEN ARROW
+      color(RST);
+      any = 1;
+    }
+  }
+}
+
+static void pr_claude(void) {
+  jsmn_parser p;
+  jsmntok_t toks[MAX_TOKENS];
+  jsmn_init(&p);
+  int n = jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS);
+  if (n < 1) {
+    color(WHT_F);
+    printf("[Unknown]");
+    color(RST);
+    return;
+  }
+  pr_claude_line1(g_input, toks, n);
+  printf("\n");
+  pr_claude_line2(g_input, toks, n);
+}
+
+// ==================== argparse ====================
+
 static int parse_int(const char *s) {
   char *end;
   long val = strtol(s, &end, 10);
@@ -986,24 +772,13 @@ static void parse_args(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
-  const char *tmp = getenv("TMPDIR");
-  snprintf(g_cache_path, sizeof(g_cache_path), "%s/.statusline_cache_%u",
-           tmp ? tmp : "/tmp", (unsigned)getuid());
   if (getenv("NO_COLOR"))
     g_no_color = 1;
   parse_args(argc, argv);
   read_stdin();
 
   if (g_mode == MODE_CLAUDE) {
-    pr_claude_info();
-    pr_block_time();
-    pr_userhost();
-    printf(":");
-    pr_cwd();
-    printf(" ");
-    pr_git();
-    pr_k8s();
-    pr_time();
+    pr_claude();
   } else {
     printf("\n");
     pr_venv();

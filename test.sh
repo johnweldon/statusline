@@ -27,12 +27,63 @@ else
   fail "help output"
 fi
 
-# Test 2: Claude mode with JSON input
-OUT=$(echo '{"display_name":"test-model"}' | ./statusline 2>&1)
+# Test 2: Claude mode with JSON input (nested schema, real Claude Code shape)
+OUT=$(echo '{"model":{"display_name":"test-model"}}' | ./statusline 2>&1)
 if echo "$OUT" | grep -q "test-model"; then
   pass "claude mode parses model name"
 else
   fail "claude mode parses model name"
+fi
+
+# Test 2a: Claude mode strips "Claude " prefix
+OUT=$(echo '{"model":{"display_name":"Claude Sonnet 4.6"}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '\[Sonnet 4\.6\]' && ! echo "$OUT" | grep -q 'Claude'; then
+  pass "claude mode strips Claude prefix"
+else
+  fail "claude mode strips Claude prefix"
+fi
+
+# Test 2b: Claude mode renders cost, lines, durations from nested cost block
+OUT=$(echo '{"model":{"display_name":"X"},"cost":{"total_cost_usd":1.426,"total_lines_added":122,"total_lines_removed":3,"total_duration_ms":783478,"total_api_duration_ms":367185}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '\$1\.43' &&
+  echo "$OUT" | grep -q '+122' &&
+  echo "$OUT" | grep -q -- '-3' &&
+  echo "$OUT" | grep -q '6m7s/13m3s'; then
+  pass "claude mode renders cost block"
+else
+  fail "claude mode renders cost block (got: $OUT)"
+fi
+
+# Test 2c: Claude mode reads context_window.used_percentage directly
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"used_percentage":42}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '42%'; then
+  pass "claude mode renders context percentage"
+else
+  fail "claude mode renders context percentage"
+fi
+
+# Test 2d: Claude mode renders 5h rate limit
+OUT=$(echo '{"model":{"display_name":"X"},"rate_limits":{"five_hour":{"used_percentage":17}}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '5h:17%'; then
+  pass "claude mode renders 5h rate limit"
+else
+  fail "claude mode renders 5h rate limit"
+fi
+
+# Test 2e: Claude mode handles minimal JSON (no fields beyond model)
+OUT=$(echo '{"model":{"display_name":"X"}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '\[X\]'; then
+  pass "claude mode handles minimal JSON"
+else
+  fail "claude mode handles minimal JSON"
+fi
+
+# Test 2f: Claude mode handles unparseable JSON
+OUT=$(echo 'not json at all' | ./statusline 2>&1)
+if echo "$OUT" | grep -q 'Unknown'; then
+  pass "claude mode handles bad JSON"
+else
+  fail "claude mode handles bad JSON"
 fi
 
 # Test 3: Bash mode output

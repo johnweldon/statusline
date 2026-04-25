@@ -18,10 +18,10 @@ make install-claude # ~/.claude/statusline
 bashline --exit-code=$? --shlvl=$SHLVL --jobs=N
 ```
 
-**Claude mode** (reads JSON from stdin):
+**Claude mode** (reads Claude Code's statusline JSON from stdin):
 
 ```bash
-echo '{"display_name":"opus"}' | statusline
+echo '{"model":{"display_name":"Opus 4.7"}}' | statusline
 ```
 
 ## Options
@@ -76,11 +76,14 @@ Add to `~/.claude/settings.json`:
 HH:MM:SS N $
 ```
 
-**Claude mode** (single line):
+**Claude mode** (two lines):
 
 ```
-[Model] N% (used/total) [cache: r:N w:N] [Nh Mm left] user@host:path (branch) * context|ns HH:MM:SS
+[Model] 📁 folder | 🌿 branch
+████████░░░░ 67% | $1.43 | +122/-3 | 5h:4% | ⏱ 6m7s/13m3s ↻99%
 ```
+
+The fields on line 2 are read from Claude Code's statusline JSON: context window usage, total cost USD, lines added/removed, 5-hour rate-limit usage, total/API duration, and cache hit rate (from `cache_read_input_tokens / (input_tokens + cache_read_input_tokens)`).
 
 ## Features
 
@@ -88,9 +91,10 @@ HH:MM:SS N $
 - In-progress merge/rebase/cherry-pick/revert/bisect detected via `.git/*_HEAD` files (no spawn)
 - Stash indicator from `.git/refs/stash`
 - K8s context/namespace from `$KUBECONFIG` or `~/.kube/config`
-- Claude 5-hour block time tracking (cached 60s)
+- Claude Code: model, folder, branch, context bar, cost, lines, rate limit, duration, cache hit rate
 - Virtualenv, SSH indicator, shell level (bash mode)
 - Respects `NO_COLOR` environment variable
+- JSON parsing via vendored `jsmn` (single-header, MIT, see `LICENSE-jsmn`)
 
 ## Environment Variables
 
