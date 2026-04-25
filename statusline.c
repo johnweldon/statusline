@@ -512,6 +512,18 @@ static void fmt_duration_ms(char *out, size_t sz, long ms) {
     snprintf(out, sz, "%lds", seconds);
 }
 
+// Compact token count: "999", "12k", "1.2M".
+static void fmt_tokens(char *out, size_t sz, long n) {
+  if (n < 0)
+    n = 0;
+  if (n < 1000)
+    snprintf(out, sz, "%ld", n);
+  else if (n < 1000000)
+    snprintf(out, sz, "%ldk", n / 1000);
+  else
+    snprintf(out, sz, "%.1fM", n / 1000000.0);
+}
+
 // 12-char progress bar colored by usage threshold.
 static void pr_progress_bar(int pct) {
   if (pct < 0)
@@ -581,23 +593,47 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
   }
 }
 
-// Line 2: bar N% | $cost | +a/-r | 5h:N% | ⏱ api/total ↻cache%
+// Line 2: bar N% used/size | $cost | +a/-r | 5h:N% | ⏱ api/total ↻cache%
 static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   int any = 0;
 
-  // Context usage: prefer the direct field, fall back to 100 - remaining.
+  // Read token data once: used downstream for the bar, absolute counts,
+  // the token-based fallback %, and the cache hit rate.
+  long size = jp_long(buf, t, n, "context_window.context_window_size", 0);
+  long in_tok =
+      jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0);
+  long out_tok =
+      jp_long(buf, t, n, "context_window.current_usage.output_tokens", 0);
+  long ccr_tok = jp_long(
+      buf, t, n, "context_window.current_usage.cache_creation_input_tokens", 0);
+  long cr_tok = jp_long(
+      buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0);
+  long used_tok = in_tok + out_tok + ccr_tok + cr_tok;
+
+  // Context %: used_percentage > 100 - remaining_percentage > tokens / size.
   long ctx = jp_long(buf, t, n, "context_window.used_percentage", -1);
   if (ctx < 0) {
     long rem = jp_long(buf, t, n, "context_window.remaining_percentage", -1);
     if (rem >= 0)
       ctx = 100 - rem;
   }
+  if (ctx < 0 && size > 0 && used_tok > 0)
+    ctx = used_tok >= size ? 100 : (used_tok * 100 / size);
   if (ctx >= 0) {
     pr_progress_bar((int)ctx);
     printf(" ");
     color(WHT_F);
     printf("%ld%%", ctx);
     color(RST);
+    if (size > 0 && used_tok > 0) {
+      char ut[16], st[16];
+      fmt_tokens(ut, sizeof(ut), used_tok);
+      fmt_tokens(st, sizeof(st), size);
+      printf(" ");
+      color(DIM);
+      printf("%s/%s", ut, st);
+      color(RST);
+    }
     any = 1;
   }
 
@@ -675,11 +711,7 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
     any = 1;
   }
 
-  // Cache hit rate: read / (input + read).
-  long in_tok =
-      jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0);
-  long cr_tok = jp_long(
-      buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0);
+  // Cache hit rate: read / (input + read). Reuses tokens read at top.
   long denom = in_tok + cr_tok;
   if (denom > 0) {
     long cache_pct = cr_tok * 100 / denom;

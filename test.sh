@@ -62,6 +62,64 @@ else
   fail "claude mode renders context percentage"
 fi
 
+# Test 2c1: token-based context fallback (no used/remaining percentages)
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"context_window_size":200000,"current_usage":{"input_tokens":15000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":80000}}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '48%' && echo "$OUT" | grep -q '97k/200k'; then
+  pass "claude mode token-based context fallback"
+else
+  fail "claude mode token-based context fallback (got: $OUT)"
+fi
+
+# Test 2c2: token fallback includes output_tokens
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"context_window_size":200000,"current_usage":{"input_tokens":15000,"output_tokens":3000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":80000}}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '50%'; then
+  pass "claude mode fallback counts output_tokens"
+else
+  fail "claude mode fallback counts output_tokens (got: $OUT)"
+fi
+
+# Test 2c3: used_percentage wins over token data
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"used_percentage":10,"context_window_size":200000,"current_usage":{"input_tokens":80000,"cache_read_input_tokens":40000}}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '10%'; then
+  pass "claude mode used_percentage wins over tokens"
+else
+  fail "claude mode used_percentage wins over tokens (got: $OUT)"
+fi
+
+# Test 2c4: remaining_percentage wins over token data
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"remaining_percentage":60,"context_window_size":200000,"current_usage":{"input_tokens":80000,"cache_read_input_tokens":40000}}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '40%'; then
+  pass "claude mode remaining_percentage wins over tokens"
+else
+  fail "claude mode remaining_percentage wins over tokens (got: $OUT)"
+fi
+
+# Test 2c5: absolute counts shown alongside used_percentage when tokens present
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"used_percentage":11,"context_window_size":1000000,"current_usage":{"input_tokens":6,"cache_read_input_tokens":100489}}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '11%' && echo "$OUT" | grep -q '100k/1.0M'; then
+  pass "claude mode shows absolute counts with used_percentage"
+else
+  fail "claude mode shows absolute counts with used_percentage (got: $OUT)"
+fi
+
+# Test 2c6: size=0 does not crash and produces no percentage
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"context_window_size":0,"current_usage":{"input_tokens":15000}}}' | ./statusline 2>&1)
+RC=$?
+if [ $RC -eq 0 ] && ! echo "$OUT" | grep -qE '[0-9]+%'; then
+  pass "claude mode size=0 no crash, no percentage"
+else
+  fail "claude mode size=0 no crash, no percentage (rc=$RC, got: $OUT)"
+fi
+
+# Test 2c7: context_window:null does not crash
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":null}' | ./statusline 2>&1)
+RC=$?
+if [ $RC -eq 0 ] && echo "$OUT" | grep -q '\[X\]'; then
+  pass "claude mode null context_window no crash"
+else
+  fail "claude mode null context_window no crash (rc=$RC, got: $OUT)"
+fi
+
 # Test 2d: Claude mode renders 5h rate limit
 OUT=$(echo '{"model":{"display_name":"X"},"rate_limits":{"five_hour":{"used_percentage":17}}}' | ./statusline 2>&1)
 if echo "$OUT" | grep -q '5h:17%'; then
