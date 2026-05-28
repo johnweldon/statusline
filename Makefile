@@ -14,10 +14,12 @@ statusline: statusline.c
 install: statusline
 	install -m 755 statusline $(PREFIX)/statusline
 	ln -sf statusline $(PREFIX)/bashline
+	ln -sf statusline $(PREFIX)/subagentline
 
 install-local: statusline
 	install -m 755 statusline $(HOME)/.local/bin/statusline
 	ln -sf statusline $(HOME)/.local/bin/bashline
+	ln -sf statusline $(HOME)/.local/bin/subagentline
 
 install-claude: statusline
 	install -m 755 statusline $(CLAUDE)/statusline
@@ -29,6 +31,6 @@ clean:
 	rm -f statusline
 
 uninstall:
-	rm -f $(PREFIX)/statusline $(PREFIX)/bashline $(CLAUDE)/statusline
+	rm -f $(PREFIX)/statusline $(PREFIX)/bashline $(PREFIX)/subagentline $(CLAUDE)/statusline
 
 .PHONY: all install install-local install-claude test clean uninstall

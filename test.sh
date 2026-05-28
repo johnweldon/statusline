@@ -70,12 +70,12 @@ else
   fail "claude mode token-based context fallback (got: $OUT)"
 fi
 
-# Test 2c2: token fallback includes output_tokens
+# Test 2c2: token fallback excludes output_tokens (matches used_percentage)
 OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"context_window_size":200000,"current_usage":{"input_tokens":15000,"output_tokens":3000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":80000}}}' | ./statusline 2>&1)
-if echo "$OUT" | grep -q '50%'; then
-  pass "claude mode fallback counts output_tokens"
+if echo "$OUT" | grep -q '48%' && ! echo "$OUT" | grep -q '50%'; then
+  pass "claude mode fallback excludes output_tokens"
 else
-  fail "claude mode fallback counts output_tokens (got: $OUT)"
+  fail "claude mode fallback excludes output_tokens (got: $OUT)"
 fi
 
 # Test 2c3: used_percentage wins over token data
@@ -142,6 +142,166 @@ if echo "$OUT" | grep -q 'Unknown'; then
   pass "claude mode handles bad JSON"
 else
   fail "claude mode handles bad JSON"
+fi
+
+# Test 2g: exact backward-compatible output (locks SPACE/PIPE separators)
+J='{"model":{"display_name":"X"},"workspace":{"current_dir":"/no/such/proj"},"context_window":{"used_percentage":67},"cost":{"total_cost_usd":1.43,"total_lines_added":122,"total_lines_removed":3,"total_api_duration_ms":367185,"total_duration_ms":783478},"rate_limits":{"five_hour":{"used_percentage":4}}}'
+OUT=$(echo "$J" | NO_COLOR=1 ./statusline --claude)
+L1=$(echo "$OUT" | sed -n '1p')
+L2=$(echo "$OUT" | sed -n '2p')
+EXP2='████████⣿⣿⣿⣿ 67% | $1.43 | +122/-3 | 5h:4% | ⏱ 6m7s/13m3s'
+if [ "$L1" = "[X] 📁 proj" ] && [ "$L2" = "$EXP2" ]; then
+  pass "claude exact backward-compatible output"
+else
+  fail "claude exact output (got L1=[$L1] L2=[$L2])"
+fi
+
+# Test 2h: effort level and thinking indicator
+OUT=$(echo '{"model":{"display_name":"X"},"effort":{"level":"high"},"thinking":{"enabled":true}}' | NO_COLOR=1 ./statusline --claude | sed -n '1p')
+if echo "$OUT" | grep -q '·high' && echo "$OUT" | grep -q '✻'; then
+  pass "claude renders effort and thinking"
+else
+  fail "claude renders effort and thinking (got: $OUT)"
+fi
+
+# Test 2i: 7-day rate limit and 5-hour reset countdown
+OUT=$(echo '{"model":{"display_name":"X"},"rate_limits":{"five_hour":{"used_percentage":17,"resets_at":9999999999},"seven_day":{"used_percentage":42}}}' | NO_COLOR=1 ./statusline --claude)
+if echo "$OUT" | grep -q '5h:17%(' && echo "$OUT" | grep -q '7d:42%'; then
+  pass "claude renders 7d limit and 5h countdown"
+else
+  fail "claude renders 7d limit and 5h countdown (got: $OUT)"
+fi
+
+# Test 2j: PR badge
+OUT=$(echo '{"model":{"display_name":"X"},"pr":{"number":1234,"review_state":"approved"}}' | NO_COLOR=1 ./statusline --claude | sed -n '1p')
+if echo "$OUT" | grep -q '#1234'; then
+  pass "claude renders PR badge"
+else
+  fail "claude renders PR badge (got: $OUT)"
+fi
+
+# Test 2k: agent, session name, output style, vim mode
+OUT=$(echo '{"model":{"display_name":"X"},"vim":{"mode":"INSERT"},"agent":{"name":"debugger"},"session_name":"sess","output_style":{"name":"concise"}}' | NO_COLOR=1 ./statusline --claude | sed -n '1p')
+if echo "$OUT" | grep -q 'INSERT' && echo "$OUT" | grep -q 'debugger' &&
+  echo "$OUT" | grep -q 'sess' && echo "$OUT" | grep -q 'concise'; then
+  pass "claude renders vim/agent/session/style"
+else
+  fail "claude renders vim/agent/session/style (got: $OUT)"
+fi
+
+# Test 2k1: default output style is suppressed
+OUT=$(echo '{"model":{"display_name":"X"},"output_style":{"name":"default"}}' | NO_COLOR=1 ./statusline --claude | sed -n '1p')
+if [ "$OUT" = "[X]" ]; then
+  pass "claude suppresses default output style"
+else
+  fail "claude suppresses default output style (got: $OUT)"
+fi
+
+# Test 2l: COLUMNS truncation drops low-priority segments
+J2='{"model":{"display_name":"X"},"workspace":{"current_dir":"/no/such/proj"},"agent":{"name":"debugger"},"session_name":"sessionnamehere"}'
+FULL=$(echo "$J2" | NO_COLOR=1 ./statusline --claude | sed -n '1p')
+NARROW=$(echo "$J2" | NO_COLOR=1 COLUMNS=20 ./statusline --claude | sed -n '1p')
+if echo "$FULL" | grep -q 'sessionnamehere' && ! echo "$NARROW" | grep -q 'sessionnamehere' &&
+  echo "$NARROW" | grep -q '\[X\]'; then
+  pass "claude COLUMNS truncation drops low-priority segments"
+else
+  fail "claude COLUMNS truncation (full=[$FULL] narrow=[$NARROW])"
+fi
+
+# Test 2m: NO_COLOR suppresses OSC 8 links even when forced
+OUT=$(echo '{"model":{"display_name":"X"},"workspace":{"current_dir":"/no/such/proj","repo":{"host":"github.com","owner":"o","name":"r"}}}' | NO_COLOR=1 FORCE_HYPERLINK=1 ./statusline --claude)
+if echo "$OUT" | grep -q $'\033]8'; then
+  fail "NO_COLOR suppresses OSC 8 links"
+else
+  pass "NO_COLOR suppresses OSC 8 links"
+fi
+
+# Test 2n: FORCE_HYPERLINK emits OSC 8 repo link
+OUT=$(echo '{"model":{"display_name":"X"},"workspace":{"current_dir":"/no/such/proj","repo":{"host":"github.com","owner":"o","name":"r"}}}' | FORCE_HYPERLINK=1 ./statusline --claude)
+if echo "$OUT" | grep -q $'\033]8;;https://github.com/o/r'; then
+  pass "FORCE_HYPERLINK emits OSC 8 repo link"
+else
+  fail "FORCE_HYPERLINK emits OSC 8 repo link"
+fi
+
+# Test 2o: subagent mode emits one JSON line per task with an id
+OUT=$(echo '{"columns":80,"tasks":[{"id":"t1","name":"explore","type":"Explore","status":"in_progress","tokenCount":15400},{"id":"t2","name":"review","status":"completed","label":"code-review","tokenCount":2300}]}' | NO_COLOR=1 ./statusline --subagent)
+if [ "$(echo "$OUT" | wc -l | tr -d ' ')" = "2" ] &&
+  echo "$OUT" | grep -q '"id":"t1"' && echo "$OUT" | grep -q '"id":"t2"'; then
+  pass "subagent emits a row per task"
+else
+  fail "subagent emits a row per task (got: $OUT)"
+fi
+
+# Test 2o1: subagent output is valid JSON per line (if jq available)
+if command -v jq > /dev/null 2>&1; then
+  BAD=0
+  while IFS= read -r line; do
+    echo "$line" | jq -e . > /dev/null 2>&1 || BAD=1
+  done <<< "$OUT"
+  if [ "$BAD" -eq 0 ]; then
+    pass "subagent output is valid JSON lines"
+  else
+    fail "subagent output is valid JSON lines"
+  fi
+else
+  pass "subagent JSON validation skipped (jq not available)"
+fi
+
+# Test 2o2: subagent skips tasks without an id
+OUT=$(echo '{"tasks":[{"name":"noid","status":"running"}]}' | ./statusline --subagent)
+if [ -z "$OUT" ]; then
+  pass "subagent skips tasks without id"
+else
+  fail "subagent skips tasks without id (got: $OUT)"
+fi
+
+# Test 2o3: subagent with no tasks key produces no output
+OUT=$(echo '{"columns":80}' | ./statusline --subagent)
+if [ -z "$OUT" ]; then
+  pass "subagent with no tasks produces no output"
+else
+  fail "subagent with no tasks produces no output (got: $OUT)"
+fi
+
+# Test 2o4: json_escape produces valid JSON for quotes/backslashes/tabs in name
+if command -v jq > /dev/null 2>&1; then
+  OUT=$(echo '{"tasks":[{"id":"t1","name":"a\"b\\c\tnext"}]}' | NO_COLOR=1 ./statusline --subagent)
+  if echo "$OUT" | jq -e . > /dev/null 2>&1; then
+    pass "subagent json_escape yields valid JSON for special chars"
+  else
+    fail "subagent json_escape yields valid JSON for special chars (got: $OUT)"
+  fi
+else
+  pass "subagent json_escape test skipped (jq not available)"
+fi
+
+# Test 2o5: subagent dispatch via STATUSLINE_MODE env var
+OUT=$(echo '{"tasks":[{"id":"z","name":"n","status":"completed"}]}' | STATUSLINE_MODE=subagent NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q '"id":"z"'; then
+  pass "subagent dispatch via STATUSLINE_MODE"
+else
+  fail "subagent dispatch via STATUSLINE_MODE (got: $OUT)"
+fi
+
+# Test 2p: resets_at in milliseconds is normalized to a sane countdown
+OUT=$(echo '{"model":{"display_name":"X"},"rate_limits":{"five_hour":{"used_percentage":17,"resets_at":9999999999000}}}' | NO_COLOR=1 ./statusline --claude)
+if echo "$OUT" | grep -q '5h:17%('; then
+  pass "claude normalizes millisecond resets_at"
+else
+  fail "claude normalizes millisecond resets_at (got: $OUT)"
+fi
+
+# Test 2q: token-count overflow (>512 jsmn tokens) degrades to [Unknown], no crash
+BIG='{"model":{"display_name":"X"}'
+for i in $(seq 1 600); do BIG="$BIG,\"k$i\":$i"; done
+BIG="$BIG}"
+OUT=$(printf '%s' "$BIG" | ./statusline --claude 2>&1)
+RC=$?
+if [ $RC -eq 0 ] && echo "$OUT" | grep -q 'Unknown'; then
+  pass "claude token overflow degrades to [Unknown]"
+else
+  fail "claude token overflow degrades to [Unknown] (rc=$RC, got: $OUT)"
 fi
 
 # Test 3: Bash mode output

@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <pwd.h>
 #include <spawn.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,11 +26,14 @@
 
 #define BUF_SIZE 65536
 #define PATH_MAX_LEN 4096
-#define MAX_TOKENS 256
+// Claude payload counts ~125 jsmn tokens with every field present; 512 leaves
+// headroom for added_dirs[] and future fields. Subagent tasks[] is far larger.
+#define MAX_TOKENS 512
+#define MAX_TOKENS_SUB 4096
 #define GIT_REF_PREFIX "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
 
-enum { MODE_CLAUDE, MODE_BASH };
+enum { MODE_CLAUDE, MODE_BASH, MODE_SUBAGENT };
 enum { FMT_RAW, FMT_PS1 };
 
 static char g_input[BUF_SIZE];
@@ -77,12 +81,14 @@ static int pathcat(char *out, size_t sz, const char *a, const char *b) {
 
 // ==================== JSON path helpers (over jsmn) ====================
 
-// Find a token by dot-separated path (e.g. "model.display_name").
-// Returns the value-token index, or -1 if any segment is missing.
-static int jp_find(const char *buf, jsmntok_t *t, int n, const char *path) {
-  if (n <= 0)
+// Find a token by dot-separated path, starting from object token `root`
+// (e.g. "model.display_name"). Returns the value-token index, or -1 if any
+// segment is missing.
+static int jp_find_from(const char *buf, jsmntok_t *t, int n, int root,
+                        const char *path) {
+  if (n <= 0 || root < 0 || root >= n)
     return -1;
-  int cur = 0;
+  int cur = root;
   const char *p = path;
   while (*p) {
     const char *seg = p;
@@ -111,14 +117,18 @@ static int jp_find(const char *buf, jsmntok_t *t, int n, const char *path) {
   return cur;
 }
 
+static int jp_find(const char *buf, jsmntok_t *t, int n, const char *path) {
+  return jp_find_from(buf, t, n, 0, path);
+}
+
 static int jp_is_null(const char *buf, jsmntok_t *tok) {
   return tok->type == JSMN_PRIMITIVE && (tok->end - tok->start) == 4 &&
          strncmp(buf + tok->start, "null", 4) == 0;
 }
 
-static int jp_str(const char *buf, jsmntok_t *t, int n, const char *path,
-                  char *out, size_t sz) {
-  int i = jp_find(buf, t, n, path);
+static int jp_str_from(const char *buf, jsmntok_t *t, int n, int root,
+                       const char *path, char *out, size_t sz) {
+  int i = jp_find_from(buf, t, n, root, path);
   if (i < 0 || t[i].type != JSMN_STRING)
     return 0;
   size_t len = (size_t)(t[i].end - t[i].start);
@@ -129,16 +139,62 @@ static int jp_str(const char *buf, jsmntok_t *t, int n, const char *path,
   return 1;
 }
 
-static long jp_long(const char *buf, jsmntok_t *t, int n, const char *path,
-                    long dflt) {
-  int i = jp_find(buf, t, n, path);
+static int jp_str(const char *buf, jsmntok_t *t, int n, const char *path,
+                  char *out, size_t sz) {
+  return jp_str_from(buf, t, n, 0, path, out, sz);
+}
+
+static long jp_long_from(const char *buf, jsmntok_t *t, int n, int root,
+                         const char *path, long dflt) {
+  int i = jp_find_from(buf, t, n, root, path);
   if (i < 0 || t[i].type != JSMN_PRIMITIVE || jp_is_null(buf, &t[i]))
     return dflt;
   char *endp;
+  errno = 0;
   long v = strtol(buf + t[i].start, &endp, 10);
-  if (endp == buf + t[i].start)
+  if (endp == buf + t[i].start || errno == ERANGE)
     return dflt;
   return v;
+}
+
+static long jp_long(const char *buf, jsmntok_t *t, int n, const char *path,
+                    long dflt) {
+  return jp_long_from(buf, t, n, 0, path, dflt);
+}
+
+// 1 = true, 0 = false, dflt if missing/null/not a boolean primitive.
+static int jp_bool(const char *buf, jsmntok_t *t, int n, const char *path,
+                   int dflt) {
+  int i = jp_find(buf, t, n, path);
+  if (i < 0 || t[i].type != JSMN_PRIMITIVE || jp_is_null(buf, &t[i]))
+    return dflt;
+  char c = buf[t[i].start];
+  if (c == 't')
+    return 1;
+  if (c == 'f')
+    return 0;
+  return dflt;
+}
+
+// Resolve a dot-path to an array token; return its index or -1.
+static int jp_find_array(const char *buf, jsmntok_t *t, int n,
+                         const char *path) {
+  int i = jp_find(buf, t, n, path);
+  if (i < 0 || t[i].type != JSMN_ARRAY)
+    return -1;
+  return i;
+}
+
+// Return the token index of the next direct child of array token `arr` at or
+// after `from`, or -1 when exhausted. jsmn sets each element's parent to the
+// array token (nested objects/arrays point at their own container), so the
+// parent==arr test selects only top-level elements. Pass the previous result
+// plus its subtree (i.e. prev+1) as `from` to walk all elements in order.
+static int jp_array_next(jsmntok_t *t, int n, int arr, int from) {
+  for (int i = from; i < n; i++)
+    if (t[i].parent == arr)
+      return i;
+  return -1;
 }
 
 static double jp_dbl(const char *buf, jsmntok_t *t, int n, const char *path,
@@ -147,8 +203,9 @@ static double jp_dbl(const char *buf, jsmntok_t *t, int n, const char *path,
   if (i < 0 || t[i].type != JSMN_PRIMITIVE || jp_is_null(buf, &t[i]))
     return dflt;
   char *endp;
+  errno = 0;
   double v = strtod(buf + t[i].start, &endp);
-  if (endp == buf + t[i].start)
+  if (endp == buf + t[i].start || errno == ERANGE)
     return dflt;
   return v;
 }
@@ -156,7 +213,7 @@ static double jp_dbl(const char *buf, jsmntok_t *t, int n, const char *path,
 // ==================== stdin ====================
 
 static void read_stdin(void) {
-  if (g_mode != MODE_CLAUDE || isatty(STDIN_FILENO))
+  if (g_mode == MODE_BASH || isatty(STDIN_FILENO))
     return;
   size_t n, total = 0;
   while ((n = fread(g_input + total, 1, sizeof(g_input) - total - 1, stdin)) >
@@ -524,25 +581,6 @@ static void fmt_tokens(char *out, size_t sz, long n) {
     snprintf(out, sz, "%.1fM", n / 1000000.0);
 }
 
-// 12-char progress bar colored by usage threshold.
-static void pr_progress_bar(int pct) {
-  if (pct < 0)
-    pct = 0;
-  if (pct > 100)
-    pct = 100;
-  const int width = 12;
-  int filled = pct * width / 100;
-  int empty = width - filled;
-  const char *fill_color = (pct < 50) ? GRN_F : (pct < 80) ? YEL_F : RED_F;
-  color(fill_color);
-  for (int i = 0; i < filled; i++)
-    fputs("\xE2\x96\x88", stdout); // U+2588 FULL BLOCK
-  color(DIM);
-  for (int i = 0; i < empty; i++)
-    fputs("\xE2\xA3\xBF", stdout); // U+28FF BRAILLE PATTERN DOTS-12345678
-  color(RST);
-}
-
 static const char *path_basename(const char *p) {
   size_t len = strlen(p);
   while (len > 1 && p[len - 1] == '/')
@@ -554,61 +592,460 @@ static const char *path_basename(const char *p) {
   return s;
 }
 
-static void pr_sep(void) {
-  color(DIM);
-  printf("|");
-  color(RST);
+// ==================== segments (width-aware emission) ====================
+// Claude-mode lines are built as segments first, then emitted: when COLUMNS is
+// set, low-priority segments are dropped to fit. `vis` tracks display width
+// (escapes contribute 0); `sep` is the join style to the previous kept segment.
+
+enum { SEP_NONE, SEP_SPACE, SEP_PIPE };
+
+#define SEG_BUF 512
+typedef struct {
+  char text[SEG_BUF];
+  size_t len;
+  int vis;  // display columns, excluding escape sequences
+  int prio; // lower kept first; 0 is never dropped
+  int sep;  // SEP_* join to the previous kept segment
+  int used;
+} seg_t;
+
+// Append literal bytes (no display-width change): colors, escapes, glyphs.
+static void seg_raw(seg_t *s, const char *str) {
+  while (*str && s->len < sizeof(s->text) - 1)
+    s->text[s->len++] = *str++;
+  s->text[s->len] = '\0';
 }
 
-// Line 1: [Model] 📁 folder | 🌿 branch
+// Append a color code, mirroring color() (respects NO_COLOR / PS1 wrapping).
+static void seg_color(seg_t *s, const char *c) {
+  if (g_no_color)
+    return;
+  if (g_fmt == FMT_PS1) {
+    seg_raw(s, "\001");
+    seg_raw(s, c);
+    seg_raw(s, "\002");
+  } else {
+    seg_raw(s, c);
+  }
+}
+
+// Append formatted plain text; display width = its codepoint count. Always
+// call as seg_addf(s, "%s", userdata): a user string used as the format would
+// be a format-string bug (caught by -Wformat-security via the attribute).
+static void seg_addf(seg_t *s, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+static void seg_addf(seg_t *s, const char *fmt, ...) {
+  char tmp[SEG_BUF];
+  va_list ap;
+  va_start(ap, fmt);
+  int w = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+  va_end(ap);
+  if (w < 0)
+    return;
+  // Count display width only on the bytes seg_raw actually appended (it stops
+  // at SEG_BUF), so a near-full segment doesn't overstate its width. Codepoints
+  // (non-continuation bytes) approximate columns; wide chars (emoji, CJK) in
+  // data strings undercount by one per glyph, which only softens truncation.
+  size_t before = s->len;
+  seg_raw(s, tmp);
+  for (size_t i = before; i < s->len; i++)
+    if (((unsigned char)s->text[i] & 0xC0) != 0x80)
+      s->vis++;
+}
+
+// Append a UTF-8 glyph with an explicit display width (2 for emoji, 1 for
+// arrows) since terminal width can't be derived from the bytes.
+static void seg_addglyph(seg_t *s, const char *utf8, int cols) {
+  seg_raw(s, utf8);
+  s->vis += cols;
+}
+
+// 12-char progress bar (buffered twin of pr_progress_bar).
+static void seg_progress_bar(seg_t *s, int pct) {
+  if (pct < 0)
+    pct = 0;
+  if (pct > 100)
+    pct = 100;
+  const int width = 12;
+  int filled = pct * width / 100;
+  const char *fc = (pct < 50) ? GRN_F : (pct < 80) ? YEL_F : RED_F;
+  seg_color(s, fc);
+  for (int i = 0; i < filled; i++)
+    seg_raw(s, "\xE2\x96\x88"); // U+2588 FULL BLOCK
+  seg_color(s, DIM);
+  for (int i = 0; i < width - filled; i++)
+    seg_raw(s, "\xE2\xA3\xBF"); // U+28FF BRAILLE PATTERN DOTS-12345678
+  seg_color(s, RST);
+  s->vis += width;
+}
+
+// 1 if the terminal likely supports OSC 8 hyperlinks (cached).
+static int hyperlinks_ok(void) {
+  static int cached = -1;
+  if (cached >= 0)
+    return cached;
+  cached = 0;
+  if (g_no_color || g_fmt == FMT_PS1)
+    return cached;
+  const char *force = getenv("FORCE_HYPERLINK");
+  if (force && *force) {
+    cached = 1;
+    return cached;
+  }
+  if (getenv("VTE_VERSION")) {
+    cached = 1;
+    return cached;
+  }
+  const char *tp = getenv("TERM_PROGRAM");
+  if (tp && (strcmp(tp, "iTerm.app") == 0 || strcmp(tp, "WezTerm") == 0 ||
+             strcmp(tp, "vscode") == 0 || strcmp(tp, "ghostty") == 0))
+    cached = 1;
+  return cached;
+}
+
+// Append `text` as an OSC 8 hyperlink to `url` when supported, else plain text.
+// Display width counts only the visible `text`.
+static void seg_link(seg_t *s, const char *url, const char *text) {
+  // Only emit the link form if the open + url + text + close all fit; otherwise
+  // a truncated sequence would leave the terminal in active-hyperlink mode.
+  size_t need = 5 + strlen(url) + 1 + strlen(text) + 7;
+  if (hyperlinks_ok() && s->len + need < sizeof(s->text)) {
+    seg_raw(s, "\033]8;;");
+    seg_raw(s, url);
+    seg_raw(s, "\a");
+    seg_addf(s, "%s", text);
+    seg_raw(s, "\033]8;;\a");
+  } else {
+    seg_addf(s, "%s", text);
+  }
+}
+
+static int sep_cols(int sep) {
+  return sep == SEP_PIPE ? 3 : sep == SEP_SPACE ? 1 : 0;
+}
+
+// Total display width of the kept segments in display order, including the
+// separators between consecutive kept segments (the first kept gets none).
+static int line_width(seg_t *segs, int count) {
+  int w = 0, first = 1;
+  for (int i = 0; i < count; i++) {
+    if (!segs[i].used)
+      continue;
+    if (!first)
+      w += sep_cols(segs[i].sep);
+    w += segs[i].vis;
+    first = 0;
+  }
+  return w;
+}
+
+static size_t buf_app(char *out, size_t sz, size_t pos, const char *str) {
+  while (*str && pos < sz - 1)
+    out[pos++] = *str++;
+  out[pos] = '\0';
+  return pos;
+}
+
+// Append a color code into a buffer, mirroring color().
+static size_t buf_color(char *out, size_t sz, size_t pos, const char *c) {
+  if (g_no_color)
+    return pos;
+  if (g_fmt == FMT_PS1) {
+    pos = buf_app(out, sz, pos, "\001");
+    pos = buf_app(out, sz, pos, c);
+    pos = buf_app(out, sz, pos, "\002");
+  } else {
+    pos = buf_app(out, sz, pos, c);
+  }
+  return pos;
+}
+
+// Decide which segments fit `budget` columns (0 = unlimited), then render them
+// in display order into `out`. prio 0 is always kept; higher prios are added
+// cheapest-first while the line fits. The first kept segment emits no
+// separator, matching the original "first shown" behavior.
+static void seg_render(seg_t *segs, int count, int budget, char *out,
+                       size_t sz) {
+  if (budget <= 0) {
+    for (int i = 0; i < count; i++)
+      segs[i].used = 1;
+  } else {
+    int maxprio = 0;
+    for (int i = 0; i < count; i++) {
+      segs[i].used = (segs[i].prio == 0);
+      if (segs[i].prio > maxprio)
+        maxprio = segs[i].prio;
+    }
+    for (int pr = 1; pr <= maxprio; pr++) {
+      for (int i = 0; i < count; i++) {
+        if (segs[i].used || segs[i].prio != pr)
+          continue;
+        segs[i].used = 1;
+        if (line_width(segs, count) > budget)
+          segs[i].used = 0;
+      }
+    }
+  }
+  size_t pos = 0;
+  out[0] = '\0';
+  int first = 1;
+  for (int i = 0; i < count; i++) {
+    if (!segs[i].used)
+      continue;
+    if (!first) {
+      if (segs[i].sep == SEP_PIPE) {
+        pos = buf_app(out, sz, pos, " ");
+        pos = buf_color(out, sz, pos, DIM);
+        pos = buf_app(out, sz, pos, "|");
+        pos = buf_color(out, sz, pos, RST);
+        pos = buf_app(out, sz, pos, " ");
+      } else if (segs[i].sep == SEP_SPACE) {
+        pos = buf_app(out, sz, pos, " ");
+      }
+    }
+    pos = buf_app(out, sz, pos, segs[i].text);
+    first = 0;
+  }
+}
+
+static void seg_emit_line(seg_t *segs, int count, int budget) {
+  char line[8192];
+  seg_render(segs, count, budget, line, sizeof(line));
+  fputs(line, stdout);
+}
+
+// COLUMNS budget for width-aware truncation; <=0 means unlimited.
+static int term_columns(void) {
+  const char *c = getenv("COLUMNS");
+  if (!c || !*c)
+    return 0;
+  char *endp;
+  long v = strtol(c, &endp, 10);
+  if (*endp != '\0' || v <= 0 || v > 100000)
+    return 0;
+  return (int)v;
+}
+
+// Line 1: [Model] [·effort ✻] 📁 folder | 🌿 branch | [vim] [PR] [agent] [name]
 static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
+  seg_t segs[12];
+  memset(segs, 0, sizeof(segs));
+  int c = 0;
+  seg_t *s;
+
+  // Model (always present; prio 0, no leading separator).
   char model[256];
   if (!jp_str(buf, t, n, "model.display_name", model, sizeof(model)))
     snprintf(model, sizeof(model), "Unknown");
-  color(WHT_F);
-  printf("[%s]", short_model(model));
-  color(RST);
+  s = &segs[c++];
+  s->prio = 0;
+  s->sep = SEP_NONE;
+  seg_color(s, WHT_F);
+  seg_addf(s, "[%s]", short_model(model));
+  seg_color(s, RST);
 
+  // Effort + extended-thinking, adjacent to the model name.
+  char effort[32];
+  int has_effort = jp_str(buf, t, n, "effort.level", effort, sizeof(effort));
+  int thinking = jp_bool(buf, t, n, "thinking.enabled", 0);
+  if (has_effort || thinking) {
+    s = &segs[c++];
+    s->prio = 2;
+    s->sep = SEP_SPACE;
+    seg_color(s, DIM);
+    if (has_effort)
+      seg_addf(s, "\xC2\xB7%s", effort); // U+00B7 MIDDLE DOT
+    if (thinking) {
+      if (has_effort)
+        seg_addf(s, " ");
+      seg_addglyph(s, "\xE2\x9C\xBB", 1); // U+273B TEARDROP-SPOKED ASTERISK
+    }
+    seg_color(s, RST);
+  }
+
+  // Folder (basename), linked to the repo when supported.
   char cur_dir[PATH_MAX_LEN] = "";
   if (!jp_str(buf, t, n, "workspace.current_dir", cur_dir, sizeof(cur_dir)))
     jp_str(buf, t, n, "cwd", cur_dir, sizeof(cur_dir));
   if (cur_dir[0]) {
-    printf(" ");
-    color(BRIGHT_BLU);
-    printf("\xF0\x9F\x93\x81 %s", path_basename(cur_dir)); // U+1F4C1 FOLDER
-    color(RST);
+    s = &segs[c++];
+    s->prio = 0;
+    s->sep = SEP_SPACE;
+    seg_color(s, BRIGHT_BLU);
+    seg_addglyph(s, "\xF0\x9F\x93\x81", 2); // U+1F4C1 FOLDER
+    seg_addf(s, " ");
+    char host[128], owner[128], repo[128];
+    if (hyperlinks_ok() &&
+        jp_str(buf, t, n, "workspace.repo.host", host, sizeof(host)) &&
+        jp_str(buf, t, n, "workspace.repo.owner", owner, sizeof(owner)) &&
+        jp_str(buf, t, n, "workspace.repo.name", repo, sizeof(repo))) {
+      char url[512];
+      snprintf(url, sizeof(url), "https://%s/%s/%s", host, owner, repo);
+      seg_link(s, url, path_basename(cur_dir));
+    } else {
+      seg_addf(s, "%s", path_basename(cur_dir));
+    }
+    seg_color(s, RST);
 
     char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
     if (find_git(cur_dir, gd, wt, sizeof(gd))) {
       char br[256];
       if (git_branch_name(gd, br, sizeof(br))) {
-        printf(" ");
-        pr_sep();
-        printf(" ");
-        color(BRIGHT_CYN);
-        printf("\xF0\x9F\x8C\xBF %s", br); // U+1F33F HERB
-        color(RST);
+        s = &segs[c++];
+        s->prio = 1;
+        s->sep = SEP_PIPE;
+        seg_color(s, BRIGHT_CYN);
+        seg_addglyph(s, "\xF0\x9F\x8C\xBF", 2); // U+1F33F HERB
+        seg_addf(s, " %s", br);
+        seg_color(s, RST);
       }
     }
   }
+
+  // Vim mode.
+  char vim[32];
+  if (jp_str(buf, t, n, "vim.mode", vim, sizeof(vim))) {
+    s = &segs[c++];
+    s->prio = 2;
+    s->sep = SEP_PIPE;
+    seg_color(s, DIM);
+    seg_addf(s, "%s", vim);
+    seg_color(s, RST);
+  }
+
+  // Open PR badge, linked to the PR url when supported.
+  long pr_num = jp_long(buf, t, n, "pr.number", -1);
+  if (pr_num >= 0) {
+    char state[32] = "", url[512] = "";
+    jp_str(buf, t, n, "pr.review_state", state, sizeof(state));
+    jp_str(buf, t, n, "pr.url", url, sizeof(url));
+    const char *col = WHT_F, *mark = "";
+    if (strcmp(state, "approved") == 0)
+      col = GRN_F, mark = " \xE2\x9C\x93"; // U+2713 CHECK MARK
+    else if (strcmp(state, "changes_requested") == 0)
+      col = RED_F, mark = " \xE2\x9C\x97"; // U+2717 BALLOT X
+    else if (strcmp(state, "pending") == 0)
+      col = YEL_F, mark = " \xE2\x80\xA6"; // U+2026 HORIZONTAL ELLIPSIS
+    else if (strcmp(state, "draft") == 0)
+      col = DIM, mark = " draft";
+    char label[64];
+    snprintf(label, sizeof(label), "#%ld%s", pr_num, mark);
+    s = &segs[c++];
+    s->prio = 3;
+    s->sep = SEP_PIPE;
+    seg_color(s, col);
+    if (url[0] && hyperlinks_ok())
+      seg_link(s, url, label);
+    else
+      seg_addf(s, "%s", label);
+    seg_color(s, RST);
+  }
+
+  // Named agent.
+  char agent[128];
+  if (jp_str(buf, t, n, "agent.name", agent, sizeof(agent))) {
+    s = &segs[c++];
+    s->prio = 3;
+    s->sep = SEP_PIPE;
+    seg_color(s, CYN_F);
+    seg_addglyph(s, "\xF0\x9F\xA4\x96", 2); // U+1F916 ROBOT FACE
+    seg_addf(s, " %s", agent);
+    seg_color(s, RST);
+  }
+
+  // Custom session name.
+  char sess[128];
+  if (jp_str(buf, t, n, "session_name", sess, sizeof(sess))) {
+    s = &segs[c++];
+    s->prio = 4;
+    s->sep = SEP_PIPE;
+    seg_color(s, DIM);
+    seg_addf(s, "%s", sess);
+    seg_color(s, RST);
+  }
+
+  // Output style (skip the implicit default to avoid noise).
+  char style[64];
+  if (jp_str(buf, t, n, "output_style.name", style, sizeof(style)) &&
+      strcmp(style, "default") != 0) {
+    s = &segs[c++];
+    s->prio = 5;
+    s->sep = SEP_PIPE;
+    seg_color(s, DIM);
+    seg_addf(s, "%s", style);
+    seg_color(s, RST);
+  }
+
+  seg_emit_line(segs, c, term_columns());
 }
 
-// Line 2: bar N% used/size | $cost | +a/-r | 5h:N% | ⏱ api/total ↻cache%
+// "2h12m" / "13m" / "<1m" from a positive second count. Empty if secs <= 0.
+static void fmt_countdown(char *out, size_t sz, long secs) {
+  if (secs <= 0) {
+    out[0] = '\0';
+    return;
+  }
+  long h = secs / 3600;
+  long m = (secs % 3600) / 60;
+  if (h > 0)
+    snprintf(out, sz, "%ldh%ldm", h, m);
+  else if (m > 0)
+    snprintf(out, sz, "%ldm", m);
+  else
+    snprintf(out, sz, "<1m");
+}
+
+// Read a 0-100 percentage that may be an integer or float; -1 if absent/null.
+static long jp_pct(const char *buf, jsmntok_t *t, int n, const char *path) {
+  int i = jp_find(buf, t, n, path);
+  if (i < 0 || t[i].type != JSMN_PRIMITIVE || jp_is_null(buf, &t[i]))
+    return -1;
+  char *endp;
+  errno = 0;
+  double v = strtod(buf + t[i].start, &endp);
+  if (endp == buf + t[i].start || errno == ERANGE)
+    return -1;
+  return (long)v;
+}
+
+// Seconds until a Unix-epoch-seconds reset, or 0 if absent/past. Tolerates a
+// millisecond value (docs say seconds, but normalize defensively).
+static long secs_until(const char *buf, jsmntok_t *t, int n, const char *path) {
+  long resets = jp_long(buf, t, n, path, 0);
+  if (resets <= 0)
+    return 0;
+  if (resets > 100000000000L) // implausible as seconds -> treat as ms
+    resets /= 1000;
+  long d = resets - (long)time(NULL);
+  return d > 0 ? d : 0;
+}
+
+// Clamp a token count to a sane range so downstream `tok * 100` arithmetic
+// cannot overflow signed long on malformed input. 100M is far above any real
+// context window.
+static long clamp_tok(long v) { return (v < 0 || v > 100000000L) ? 0 : v; }
+
+// Line 2: bar N% used/size | $cost | +a/-r | 5h:N%(reset) 7d:M% | ⏱ api/total
+// ↻%
 static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
-  int any = 0;
+  seg_t segs[8];
+  memset(segs, 0, sizeof(segs));
+  int c = 0;
+  seg_t *s;
 
   // Read token data once: used downstream for the bar, absolute counts,
   // the token-based fallback %, and the cache hit rate.
   long size = jp_long(buf, t, n, "context_window.context_window_size", 0);
-  long in_tok =
-      jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0);
-  long out_tok =
-      jp_long(buf, t, n, "context_window.current_usage.output_tokens", 0);
-  long ccr_tok = jp_long(
-      buf, t, n, "context_window.current_usage.cache_creation_input_tokens", 0);
-  long cr_tok = jp_long(
-      buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0);
-  long used_tok = in_tok + out_tok + ccr_tok + cr_tok;
+  long in_tok = clamp_tok(
+      jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0));
+  long ccr_tok = clamp_tok(
+      jp_long(buf, t, n,
+              "context_window.current_usage.cache_creation_input_tokens", 0));
+  long cr_tok = clamp_tok(jp_long(
+      buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
+  // Input-only sum, matching how Claude Code computes used_percentage
+  // (input + cache creation + cache read; output_tokens are excluded).
+  long used_tok = in_tok + ccr_tok + cr_tok;
 
   // Context %: used_percentage > 100 - remaining_percentage > tokens / size.
   long ctx = jp_long(buf, t, n, "context_window.used_percentage", -1);
@@ -620,73 +1057,84 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   if (ctx < 0 && size > 0 && used_tok > 0)
     ctx = used_tok >= size ? 100 : (used_tok * 100 / size);
   if (ctx >= 0) {
-    pr_progress_bar((int)ctx);
-    printf(" ");
-    color(WHT_F);
-    printf("%ld%%", ctx);
-    color(RST);
+    s = &segs[c++];
+    s->prio = 0;
+    s->sep = SEP_NONE;
+    seg_progress_bar(s, (int)ctx);
+    seg_addf(s, " ");
+    seg_color(s, WHT_F);
+    seg_addf(s, "%ld%%", ctx);
+    seg_color(s, RST);
     if (size > 0 && used_tok > 0) {
       char ut[16], st[16];
       fmt_tokens(ut, sizeof(ut), used_tok);
       fmt_tokens(st, sizeof(st), size);
-      printf(" ");
-      color(DIM);
-      printf("%s/%s", ut, st);
-      color(RST);
+      s = &segs[c++];
+      s->prio = 3;
+      s->sep = SEP_SPACE;
+      seg_color(s, DIM);
+      seg_addf(s, "%s/%s", ut, st);
+      seg_color(s, RST);
     }
-    any = 1;
   }
 
   // Cost (always shown when present).
   double cost = jp_dbl(buf, t, n, "cost.total_cost_usd", -1.0);
   if (cost >= 0) {
-    if (any) {
-      printf(" ");
-      pr_sep();
-      printf(" ");
-    }
-    color(YEL_F);
-    printf("$%.2f", cost);
-    color(RST);
-    any = 1;
+    s = &segs[c++];
+    s->prio = 1;
+    s->sep = SEP_PIPE;
+    seg_color(s, YEL_F);
+    seg_addf(s, "$%.2f", cost);
+    seg_color(s, RST);
   }
 
   // Lines added / removed.
   long added = jp_long(buf, t, n, "cost.total_lines_added", 0);
   long removed = jp_long(buf, t, n, "cost.total_lines_removed", 0);
   if (added > 0 || removed > 0) {
-    if (any) {
-      printf(" ");
-      pr_sep();
-      printf(" ");
-    }
-    color(GRN_F);
-    printf("+%ld", added);
-    color(RST);
-    printf("/");
-    color(RED_F);
-    printf("-%ld", removed);
-    color(RST);
-    any = 1;
+    s = &segs[c++];
+    s->prio = 4;
+    s->sep = SEP_PIPE;
+    seg_color(s, GRN_F);
+    seg_addf(s, "+%ld", added);
+    seg_color(s, RST);
+    seg_addf(s, "/");
+    seg_color(s, RED_F);
+    seg_addf(s, "-%ld", removed);
+    seg_color(s, RST);
   }
 
-  // 5-hour rate limit. Value may be integer or float; cast to long via dbl.
-  int ri = jp_find(buf, t, n, "rate_limits.five_hour.used_percentage");
-  if (ri >= 0 && t[ri].type == JSMN_PRIMITIVE && !jp_is_null(buf, &t[ri])) {
-    char *endp;
-    double rv = strtod(buf + t[ri].start, &endp);
-    if (endp != buf + t[ri].start) {
-      long rate = (long)rv;
-      if (any) {
-        printf(" ");
-        pr_sep();
-        printf(" ");
+  // Rate limits: 5-hour (with reset countdown) and 7-day windows.
+  long rate5 = jp_pct(buf, t, n, "rate_limits.five_hour.used_percentage");
+  long rate7 = jp_pct(buf, t, n, "rate_limits.seven_day.used_percentage");
+  if (rate5 >= 0 || rate7 >= 0) {
+    s = &segs[c++];
+    s->prio = 2;
+    s->sep = SEP_PIPE;
+    int first_rl = 1;
+    if (rate5 >= 0) {
+      const char *rc = (rate5 < 50) ? GRN_F : (rate5 < 80) ? YEL_F : RED_F;
+      seg_color(s, rc);
+      seg_addf(s, "5h:%ld%%", rate5);
+      seg_color(s, RST);
+      char cd[16];
+      fmt_countdown(cd, sizeof(cd),
+                    secs_until(buf, t, n, "rate_limits.five_hour.resets_at"));
+      if (cd[0]) {
+        seg_color(s, DIM);
+        seg_addf(s, "(%s)", cd);
+        seg_color(s, RST);
       }
-      const char *rc = (rate < 50) ? GRN_F : (rate < 80) ? YEL_F : RED_F;
-      color(rc);
-      printf("5h:%ld%%", rate);
-      color(RST);
-      any = 1;
+      first_rl = 0;
+    }
+    if (rate7 >= 0) {
+      if (!first_rl)
+        seg_addf(s, " ");
+      const char *rc = (rate7 < 50) ? GRN_F : (rate7 < 80) ? YEL_F : RED_F;
+      seg_color(s, rc);
+      seg_addf(s, "7d:%ld%%", rate7);
+      seg_color(s, RST);
     }
   }
 
@@ -697,18 +1145,16 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   fmt_duration_ms(api_s, sizeof(api_s), api_ms);
   fmt_duration_ms(tot_s, sizeof(tot_s), tot_ms);
   if (tot_s[0]) {
-    if (any) {
-      printf(" ");
-      pr_sep();
-      printf(" ");
-    }
-    color(CYN_F);
+    s = &segs[c++];
+    s->prio = 3;
+    s->sep = SEP_PIPE;
+    seg_color(s, CYN_F);
+    seg_addglyph(s, "\xE2\x8F\xB1", 1); // U+23F1 STOPWATCH
     if (api_s[0])
-      printf("\xE2\x8F\xB1 %s/%s", api_s, tot_s); // U+23F1 STOPWATCH
+      seg_addf(s, " %s/%s", api_s, tot_s);
     else
-      printf("\xE2\x8F\xB1 %s", tot_s);
-    color(RST);
-    any = 1;
+      seg_addf(s, " %s", tot_s);
+    seg_color(s, RST);
   }
 
   // Cache hit rate: read / (input + read). Reuses tokens read at top.
@@ -716,13 +1162,17 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   if (denom > 0) {
     long cache_pct = cr_tok * 100 / denom;
     if (cache_pct > 0) {
-      printf(" ");
-      color(DIM);
-      printf("\xE2\x86\xBB%ld%%", cache_pct); // U+21BB CLOCKWISE OPEN ARROW
-      color(RST);
-      any = 1;
+      s = &segs[c++];
+      s->prio = 5;
+      s->sep = SEP_SPACE;
+      seg_color(s, DIM);
+      seg_addglyph(s, "\xE2\x86\xBB", 1); // U+21BB CLOCKWISE OPEN ARROW
+      seg_addf(s, "%ld%%", cache_pct);
+      seg_color(s, RST);
     }
   }
+
+  seg_emit_line(segs, c, term_columns());
 }
 
 static void pr_claude(void) {
@@ -741,6 +1191,140 @@ static void pr_claude(void) {
   pr_claude_line2(g_input, toks, n);
 }
 
+// ==================== subagent mode ====================
+
+// JSON-string-escape `in` into `out`. Control bytes (including ANSI ESC) become
+// \uXXXX; the consumer renders the decoded ANSI/OSC sequences as-is.
+static void json_escape(char *out, size_t sz, const char *in) {
+  size_t p = 0;
+  for (; *in && p < sz - 1; in++) {
+    unsigned char ch = (unsigned char)*in;
+    char tmp[8];
+    const char *esc = NULL;
+    switch (ch) {
+    case '"':
+      esc = "\\\"";
+      break;
+    case '\\':
+      esc = "\\\\";
+      break;
+    case '\n':
+      esc = "\\n";
+      break;
+    case '\r':
+      esc = "\\r";
+      break;
+    case '\t':
+      esc = "\\t";
+      break;
+    default:
+      if (ch < 0x20) {
+        snprintf(tmp, sizeof(tmp), "\\u%04x", ch);
+        esc = tmp;
+      }
+      break;
+    }
+    if (esc) {
+      while (*esc && p < sz - 1)
+        out[p++] = *esc++;
+    } else {
+      out[p++] = (char)ch;
+    }
+  }
+  out[p] = '\0';
+}
+
+// Render one subagent row override: {"id":"<id>","content":"<body>"}.
+// The `status` enum is undocumented, so match tolerantly with a neutral
+// default.
+static void pr_subagent_row(const char *buf, jsmntok_t *t, int n, int el,
+                            int cols) {
+  char id[128];
+  if (!jp_str_from(buf, t, n, el, "id", id, sizeof(id)))
+    return; // no id -> keep the default row
+  char name[256] = "", status[64] = "", label[256] = "";
+  jp_str_from(buf, t, n, el, "name", name, sizeof(name));
+  jp_str_from(buf, t, n, el, "status", status, sizeof(status));
+  if (!jp_str_from(buf, t, n, el, "label", label, sizeof(label)))
+    jp_str_from(buf, t, n, el, "type", label, sizeof(label));
+  long tokc = jp_long_from(buf, t, n, el, "tokenCount", -1);
+
+  seg_t segs[4];
+  memset(segs, 0, sizeof(segs));
+  int c = 0;
+  seg_t *s;
+
+  const char *col = DIM, *gl = "\xC2\xB7"; // U+00B7 pending/unknown
+  if (strstr(status, "complet") || strstr(status, "done") ||
+      strstr(status, "success") || strstr(status, "finish"))
+    col = GRN_F, gl = "\xE2\x9C\x93"; // U+2713 CHECK MARK
+  else if (strstr(status, "fail") || strstr(status, "error") ||
+           strstr(status, "cancel"))
+    col = RED_F, gl = "\xE2\x9C\x97"; // U+2717 BALLOT X
+  else if (strstr(status, "run") || strstr(status, "progress") ||
+           strstr(status, "active") || strstr(status, "work"))
+    col = CYN_F, gl = "\xE2\x96\xB8"; // U+25B8 BLACK RIGHT-POINTING TRIANGLE
+  s = &segs[c++];
+  s->prio = 0;
+  s->sep = SEP_NONE;
+  seg_color(s, col);
+  seg_addglyph(s, gl, 1);
+  seg_color(s, RST);
+
+  if (name[0]) {
+    s = &segs[c++];
+    s->prio = 0;
+    s->sep = SEP_SPACE;
+    seg_color(s, WHT_F);
+    seg_addf(s, "%s", name);
+    seg_color(s, RST);
+  }
+  if (label[0]) {
+    s = &segs[c++];
+    s->prio = 2;
+    s->sep = SEP_SPACE;
+    seg_color(s, DIM);
+    seg_addf(s, "\xC2\xB7 %s", label);
+    seg_color(s, RST);
+  }
+  if (tokc >= 0) {
+    char tk[16];
+    fmt_tokens(tk, sizeof(tk), tokc);
+    s = &segs[c++];
+    s->prio = 1;
+    s->sep = SEP_SPACE;
+    seg_color(s, DIM);
+    seg_addf(s, "\xC2\xB7 %s", tk);
+    seg_color(s, RST);
+  }
+
+  char body[4096], ebody[8192], eid[256];
+  seg_render(segs, c, cols, body, sizeof(body));
+  json_escape(ebody, sizeof(ebody), body);
+  json_escape(eid, sizeof(eid), id);
+  printf("{\"id\":\"%s\",\"content\":\"%s\"}\n", eid, ebody);
+}
+
+static void pr_subagent(void) {
+  static jsmntok_t toks[MAX_TOKENS_SUB];
+  jsmn_parser p;
+  jsmn_init(&p);
+  int n = jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS_SUB);
+  if (n < 1)
+    return;
+  long cols = jp_long(g_input, toks, n, "columns", 0);
+  if (cols <= 0 || cols > 100000) // bound before the (int) cast below
+    cols = term_columns();
+  int arr = jp_find_array(g_input, toks, n, "tasks");
+  if (arr < 0)
+    return;
+  for (int el = jp_array_next(toks, n, arr, arr + 1); el >= 0;
+       el = jp_array_next(toks, n, arr, el + 1)) {
+    if (toks[el].type == JSMN_OBJECT)
+      pr_subagent_row(g_input, toks, n, el, (int)cols);
+  }
+}
+
 // ==================== argparse ====================
 
 static int parse_int(const char *s) {
@@ -755,6 +1339,8 @@ static void usage(const char *prog) {
   fprintf(stderr, "Usage: %s [OPTIONS]\n", prog);
   fprintf(stderr, "  --bash         Bash prompt mode\n");
   fprintf(stderr, "  --claude       Claude Code mode (default)\n");
+  fprintf(stderr,
+          "  --subagent     Subagent status line (JSON-lines output)\n");
   fprintf(stderr, "  --ps1          PS1-compatible escapes\n");
   fprintf(stderr, "  --exit-code=N  Last exit code\n");
   fprintf(stderr, "  --jobs=N       Background jobs\n");
@@ -768,6 +1354,8 @@ static void parse_args(int argc, char **argv) {
   if (strcmp(prog, "bashline") == 0) {
     g_mode = MODE_BASH;
     g_fmt = FMT_PS1;
+  } else if (strcmp(prog, "subagentline") == 0) {
+    g_mode = MODE_SUBAGENT;
   }
   const char *em = getenv("STATUSLINE_MODE");
   if (em) {
@@ -775,6 +1363,8 @@ static void parse_args(int argc, char **argv) {
       g_mode = MODE_BASH;
     else if (strcmp(em, "claude") == 0)
       g_mode = MODE_CLAUDE;
+    else if (strcmp(em, "subagent") == 0)
+      g_mode = MODE_SUBAGENT;
   }
   const char *es = getenv("SHLVL");
   if (es)
@@ -784,6 +1374,8 @@ static void parse_args(int argc, char **argv) {
       g_mode = MODE_BASH;
     else if (strcmp(argv[i], "--claude") == 0)
       g_mode = MODE_CLAUDE;
+    else if (strcmp(argv[i], "--subagent") == 0)
+      g_mode = MODE_SUBAGENT;
     else if (strcmp(argv[i], "--ps1") == 0)
       g_fmt = FMT_PS1;
     else if (strncmp(argv[i], "--exit-code=", 12) == 0)
@@ -811,6 +1403,8 @@ int main(int argc, char **argv) {
 
   if (g_mode == MODE_CLAUDE) {
     pr_claude();
+  } else if (g_mode == MODE_SUBAGENT) {
+    pr_subagent();
   } else {
     printf("\n");
     pr_venv();
