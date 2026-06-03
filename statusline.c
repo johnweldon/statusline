@@ -1065,6 +1065,10 @@ static void fmt_countdown(char *out, size_t sz, long secs) {
     out[0] = '\0';
     return;
   }
+  // Rate-limit windows top out around a week; clamp so a bogus reset
+  // timestamp can't produce absurd output (and bounds h for the buffer).
+  if (secs > 7 * 24 * 3600)
+    secs = 7 * 24 * 3600;
   long h = secs / 3600;
   long m = (secs % 3600) / 60;
   if (h > 0)
