@@ -88,6 +88,8 @@ To render subagent rows as well, add the top-level `subagentStatusLine` entry:
 HH:MM:SS N $
 ```
 
+The working directory is shown relative to `$HOME` as `~`. When it has four or more parent directories, each parent is abbreviated to its initial while the current directory is kept in full, so `~/build/src/github.com/johnweldon/statusline` renders as `~/b/s/g/j/statusline` (hidden `.name` dirs keep two characters, e.g. `.config` becomes `.c`).
+
 **Claude mode** (two lines):
 
 ```
@@ -120,6 +122,7 @@ A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task
 - OSC 8 clickable links (repo, PR) when the terminal supports them
 - Subagent status line (`--subagent`): per-task JSON-lines row overrides
 - Virtualenv, SSH indicator, shell level (bash mode)
+- Bash mode abbreviates deep working directories: with four or more parent dirs, each parent collapses to its initial and the current dir is kept full
 - Respects `NO_COLOR` environment variable
 - JSON parsing via vendored `jsmn` (single-header, MIT, see `LICENSE-jsmn`)
 

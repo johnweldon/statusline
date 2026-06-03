@@ -476,6 +476,120 @@ else
 fi
 cleanup_repo "$TMPD"
 
+# --- Bash cwd path truncation tests ---
+# Bash mode renders the cwd from getcwd(), so each case builds a real tree and
+# runs the binary inside it (a fabricated path via stdin would not apply).
+
+# Rendered cwd token: line 2 of bash output, between the first ':' (the
+# user@host separator) and the following space. NO_COLOR keeps it plain.
+bash_cwd() {
+  sed -n '2p' | sed 's/[^:]*://; s/ .*//'
+}
+run_cwd() { # $1=dir  $2=HOME
+  (
+    cd "$1" || exit 1
+    HOME="$2" NO_COLOR=1 "$SL" --bash
+  ) | bash_cwd
+}
+
+# Test 16: deep HOME path abbreviates interior dirs, keeps current dir full
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/build/src/github.com/johnweldon/statusline"
+TOK=$(run_cwd "$TMPD/build/src/github.com/johnweldon/statusline" "$TMPD")
+if [ "$TOK" = "~/b/s/g/j/statusline" ]; then
+  pass "bash cwd deep HOME path truncates to initials"
+else
+  fail "bash cwd deep HOME path (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
+# Test 17: deep absolute path keeps single leading '/', no '//', leaf full
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/usr/local/share/man/man1/extra"
+TOK=$(run_cwd "$TMPD/usr/local/share/man/man1/extra" /nonexistent)
+if printf '%s' "$TOK" | grep -q '/m/m/extra$' && ! printf '%s' "$TOK" | grep -q '//'; then
+  pass "bash cwd deep absolute path single leading slash"
+else
+  fail "bash cwd deep absolute path (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
+# Test 18: at-threshold HOME path (interior 3) renders unchanged
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/a/b/c/d"
+TOK=$(run_cwd "$TMPD/a/b/c/d" "$TMPD")
+if [ "$TOK" = "~/a/b/c/d" ]; then
+  pass "bash cwd at-threshold path unchanged"
+else
+  fail "bash cwd at-threshold path (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
+# Test 19: hidden interior dir keeps dot + next codepoint
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/.config/nvim/lua/plugins/foo"
+TOK=$(run_cwd "$TMPD/.config/nvim/lua/plugins/foo" "$TMPD")
+if [ "$TOK" = "~/.c/n/l/p/foo" ]; then
+  pass "bash cwd hidden dir keeps dot plus letter"
+else
+  fail "bash cwd hidden dir (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
+# Test 20: cwd == HOME renders a bare '~'
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+TOK=$(run_cwd "$TMPD" "$TMPD")
+if [ "$TOK" = "~" ]; then
+  pass "bash cwd HOME itself renders tilde"
+else
+  fail "bash cwd HOME itself (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
+# Test 21: multibyte interior dir keeps the whole first codepoint
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+if mkdir -p "$TMPD/éfoo/bar/baz/qux/leaf" 2> /dev/null && [ -d "$TMPD/éfoo/bar/baz/qux/leaf" ]; then
+  TOK=$(run_cwd "$TMPD/éfoo/bar/baz/qux/leaf" "$TMPD")
+  if [ "$TOK" = "~/é/b/b/q/leaf" ]; then
+    pass "bash cwd multibyte interior keeps whole codepoint"
+  else
+    fail "bash cwd multibyte interior (got: $TOK)"
+  fi
+else
+  pass "bash cwd multibyte interior (skipped: cannot create multibyte dir)"
+fi
+rm -rf "$TMPD"
+
+# Test 22: HOME must be a full path component, not a string prefix
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/weldon2/p/q/r/s/leaf"
+TOK=$(run_cwd "$TMPD/weldon2/p/q/r/s/leaf" "$TMPD/weldon")
+if ! printf '%s' "$TOK" | grep -q '~' && printf '%s' "$TOK" | grep -q '/leaf$'; then
+  pass "bash cwd HOME prefix requires full component"
+else
+  fail "bash cwd HOME prefix boundary (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
+# Test 23: literal '..name' interior dir keeps only its first '.', never '..'
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/..config/aa/bb/cc/dd/ee"
+TOK=$(run_cwd "$TMPD/..config/aa/bb/cc/dd/ee" "$TMPD")
+if [ "$TOK" = "~/./a/b/c/d/ee" ]; then
+  pass "bash cwd dotdot-name interior never renders as .."
+else
+  fail "bash cwd dotdot-name interior (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
 # Summary
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

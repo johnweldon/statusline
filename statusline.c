@@ -496,6 +496,42 @@ static void pr_userhost(void) {
   color(RST);
 }
 
+// Interior parent dirs above which the bash cwd slug is abbreviated to
+// initials. "Interior" excludes the root marker (~ or /) and the current
+// dir, which is always shown in full.
+#define PATH_TRUNC_INTERIOR 3
+
+// Index just past the first UTF-8 codepoint of seg[i..len), so a multibyte
+// name is never split mid-character.
+static size_t cwd_cp_next(const char *seg, size_t i, size_t len) {
+  if (i >= len)
+    return i;
+  unsigned char c = (unsigned char)seg[i++];
+  if (c >= 0xC2) {
+    int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : 1;
+    while (extra-- > 0 && i < len && ((unsigned char)seg[i] & 0xC0) == 0x80)
+      i++;
+  }
+  return i;
+}
+
+// Bytes to keep when abbreviating an interior component: the first codepoint,
+// plus a second only for a hidden ".name" dir so it reads as ".x" not a bare
+// ".". Literal "." / ".." are kept whole; a "..name" dir keeps only its first
+// '.' so it never renders as a misleading "..".
+static size_t cwd_keep(const char *seg, size_t len) {
+  if (len == 0)
+    return 0;
+  if (seg[0] == '.') {
+    if (len <= 2)
+      return len;
+    if (seg[1] == '.')
+      return cwd_cp_next(seg, 0, len);
+    return cwd_cp_next(seg, cwd_cp_next(seg, 0, len), len);
+  }
+  return cwd_cp_next(seg, 0, len);
+}
+
 static void pr_cwd(void) {
   char cwd[PATH_MAX_LEN];
   if (!getcwd(cwd, sizeof(cwd)))
@@ -505,11 +541,55 @@ static void pr_cwd(void) {
   size_t hl = h ? strlen(h) : 0;
   // Only abbreviate HOME when it's a full-path-component prefix of cwd,
   // so HOME=/Users/weldon doesn't match cwd=/Users/weldon2.
+  char root = '\0';
+  const char *rem = cwd;
   if (h && hl > 0 && strncmp(cwd, h, hl) == 0 &&
-      (cwd[hl] == '\0' || cwd[hl] == '/'))
-    printf("~%s", cwd + hl);
-  else
-    printf("%s", cwd);
+      (cwd[hl] == '\0' || cwd[hl] == '/')) {
+    root = '~';
+    rem = cwd + hl;
+  }
+  // Count '/'-delimited components in the remainder; "interior" excludes the
+  // current (last) dir.
+  int nseg = 0;
+  for (const char *p = rem; *p;) {
+    if (*p == '/') {
+      p++;
+      continue;
+    }
+    while (*p && *p != '/')
+      p++;
+    nseg++;
+  }
+  int interior = nseg > 0 ? nseg - 1 : 0;
+  if (interior <= PATH_TRUNC_INTERIOR) {
+    // Shallow path: byte-for-byte identical to the pre-truncation output.
+    if (root == '~')
+      printf("~%s", cwd + hl);
+    else
+      printf("%s", cwd);
+  } else {
+    // Abbreviate every interior dir to its initial codepoint(s); keep the
+    // current dir in full. A '/' precedes each component (the home case is
+    // prefixed with '~'); the leading '/' of an absolute path is supplied by
+    // the first component's separator, so no "//" appears.
+    if (root == '~')
+      putchar('~');
+    int i = 0;
+    for (const char *p = rem; *p;) {
+      if (*p == '/') {
+        p++;
+        continue;
+      }
+      const char *s = p;
+      while (*p && *p != '/')
+        p++;
+      size_t seglen = (size_t)(p - s);
+      putchar('/');
+      size_t keep = (i == nseg - 1) ? seglen : cwd_keep(s, seglen);
+      fwrite(s, 1, keep, stdout);
+      i++;
+    }
+  }
   color(RST);
 }
 
