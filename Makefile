@@ -6,31 +6,37 @@ VERSION = $(shell git describe --tags --always --dirty 2>/dev/null || echo "unkn
 
 .DEFAULT_GOAL := statusline
 
-all: statusline
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' | \
+		sed -e 's|[$$](PREFIX)|$(PREFIX)|g' -e 's|[$$](CLAUDE)|$(CLAUDE)|g' \
+		    -e 's|[$$](HOME)|$(HOME)|g'
 
-statusline: statusline.c
+all: statusline ## Build everything (alias for statusline)
+
+statusline: statusline.c ## Build the statusline binary (default)
 	$(CC) $(CFLAGS) -DVERSION=\"$(VERSION)\" -o $@ $<
 
-install: statusline
+install: statusline ## Install binary and symlinks to $(PREFIX)
 	install -m 755 statusline $(PREFIX)/statusline
 	ln -sf statusline $(PREFIX)/bashline
 	ln -sf statusline $(PREFIX)/subagentline
 
-install-local: statusline
+install-local: statusline ## Install binary and symlinks to $(HOME)/.local/bin
 	install -m 755 statusline $(HOME)/.local/bin/statusline
 	ln -sf statusline $(HOME)/.local/bin/bashline
 	ln -sf statusline $(HOME)/.local/bin/subagentline
 
-install-claude: statusline
+install-claude: statusline ## Install binary to $(CLAUDE)
 	install -m 755 statusline $(CLAUDE)/statusline
 
-test: statusline
+test: statusline ## Build, then run the test suite
 	./test.sh
 
-clean:
+clean: ## Remove the built binary
 	rm -f statusline
 
-uninstall:
+uninstall: ## Remove all installed binaries and symlinks
 	rm -f $(PREFIX)/statusline $(PREFIX)/bashline $(PREFIX)/subagentline $(CLAUDE)/statusline
 
-.PHONY: all install install-local install-claude test clean uninstall
+.PHONY: help all install install-local install-claude test clean uninstall
