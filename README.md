@@ -8,6 +8,7 @@ Fast status line generator for bash prompts and Claude Code.
 make
 make install        # /usr/local/bin/statusline + bashline symlink
 make install-claude # ~/.claude/statusline
+make help           # list all targets
 ```
 
 ## Usage
