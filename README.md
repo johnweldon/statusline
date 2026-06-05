@@ -80,7 +80,26 @@ To render subagent rows as well, add the top-level `subagentStatusLine` entry:
 }
 ```
 
+## Antigravity Integration
+
+To build and install the binary directly to your Antigravity data directory, run:
+
+```bash
+make install-antigravity
+```
+
+This copies the built `statusline` binary to `~/.gemini/antigravity-cli/statusline`. Once installed, configure Antigravity to use it by running the slash command in your chat session:
+
+```text
+/statusline ~/.gemini/antigravity-cli/statusline
+```
+
+*(Alternatively, you can run `make install` or `make install-local` and configure with `/statusline ~/.local/bin/statusline` or `/statusline /usr/local/bin/statusline`)*.
+
+The statusline binary auto-detects if the input JSON is from Antigravity (by checking the `"product"` field on stdin) and automatically formats the output for Antigravity (Gemini).
+
 ## Display
+
 
 **Bash mode** (two lines):
 
@@ -103,6 +122,17 @@ Line 1 shows the model (with reasoning `effort.level` and a `✻` when extended 
 Line 2 is read from Claude Code's statusline JSON: context window usage and absolute tokens, total cost USD, lines added/removed, 5-hour and 7-day rate-limit usage (the 5-hour shows a reset countdown), total/API duration, and cache hit rate (from `cache_read_input_tokens / (input_tokens + cache_read_input_tokens)`).
 
 When `COLUMNS` is set (Claude Code v2.1.153+ exports it), lower-priority segments are dropped to fit the terminal width; the model, folder, and context percentage are kept longest. When `COLUMNS` is unset the full line is emitted.
+
+**Antigravity mode** (two lines):
+
+```
+[Model] 🤖 state | 📦 sandbox | 📁 folder | 🌿 branch | ⭐ tier | #conv_id | ✉ email
+████████⣿⣿⣿⣿ 6% 58k/1.0M (17k out) ↻99% | ⚠️ >200k | v1.0.5
+```
+
+Line 1 shows the model name (with "Gemini " prefix stripped), active agent state (`🤖 idle`/`🤖 thinking`/`🤖 working`), sandbox status (`📦 sandbox` if enabled), working-directory basename (clickable to repo), git branch, plan tier (e.g. `⭐ Google AI Pro`), truncated conversation/session ID (`#8dedc981`), and user email (`✉ johnweldon4@gmail.com`).
+
+Line 2 shows context window usage percentage, absolute tokens (input/total), output tokens, cache hit rate (`↻ 99%`), a warning badge if context exceeds 200k tokens (`⚠️ >200k`), and the antigravity CLI version.
 
 **Subagent mode** (`--subagent`): reads the `subagentStatusLine` JSON (base fields plus `columns` and a `tasks[]` array) and writes one JSON line per row to override, e.g.:
 

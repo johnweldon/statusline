@@ -304,6 +304,81 @@ else
   fail "claude token overflow degrades to [Unknown] (rc=$RC, got: $OUT)"
 fi
 
+# Test 2r1: Antigravity mode with JSON input (explicit flag)
+OUT=$(echo '{"model":{"display_name":"Gemini 3.5 Flash"},"product":"antigravity"}' | ./statusline --antigravity 2>&1)
+if echo "$OUT" | grep -q '\[3.5 Flash\]'; then
+  pass "antigravity mode parses model name with explicit flag"
+else
+  fail "antigravity mode parses model name with explicit flag (got: $OUT)"
+fi
+
+# Test 2r2: Antigravity mode auto-detection (no flags, default Claude mode detects product)
+OUT=$(echo '{"model":{"display_name":"Gemini 3.5 Flash"},"product":"antigravity"}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '\[3.5 Flash\]'; then
+  pass "antigravity mode auto-detected by product field"
+else
+  fail "antigravity mode auto-detected by product field (got: $OUT)"
+fi
+
+# Test 2r3: Antigravity mode renders agent state, plan tier, conversation id, email, sandbox
+J_AG='{"model":{"display_name":"Gemini 3.5 Flash (Medium)"},"product":"antigravity","agent_state":"working","sandbox":{"enabled":true},"plan_tier":"Google AI Pro","conversation_id":"8dedc981-2ea7-4e84-bc31-4a50a38de9bb","email":"johnweldon4@gmail.com","workspace":{"current_dir":"/no/such/proj"}}'
+OUT=$(echo "$J_AG" | NO_COLOR=1 ./statusline --antigravity)
+L1=$(echo "$OUT" | sed -n '1p')
+if echo "$L1" | grep -q '\[3.5 Flash (Medium)\]' &&
+   echo "$L1" | grep -q 'working' &&
+   echo "$L1" | grep -q 'sandbox' &&
+   echo "$L1" | grep -q 'proj' &&
+   echo "$L1" | grep -q 'Google AI Pro' &&
+   echo "$L1" | grep -q '#8dedc981' &&
+   echo "$L1" | grep -q 'johnweldon4@gmail.com'; then
+  pass "antigravity mode renders all line 1 segments"
+else
+  fail "antigravity mode renders all line 1 segments (got: $L1)"
+fi
+
+# Test 2r4: Antigravity mode renders context window metrics, Cache hit, exceeds 200k, version
+J_AG2='{"model":{"display_name":"X"},"product":"antigravity","version":"1.0.5","exceeds_200k_tokens":true,"context_window":{"context_window_size":1000000,"total_input_tokens":58533,"total_output_tokens":17039,"used_percentage":5.85,"current_usage":{"input_tokens":534,"cache_read_input_tokens":57116}}}'
+OUT=$(echo "$J_AG2" | NO_COLOR=1 ./statusline --antigravity)
+L2=$(echo "$OUT" | sed -n '2p')
+if echo "$L2" | grep -q '5%' &&
+   echo "$L2" | grep -q '58k/1.0M' &&
+   echo "$L2" | grep -q '17k out' &&
+   echo "$L2" | grep -q '99%' &&
+   echo "$L2" | grep -q '>200k' &&
+   echo "$L2" | grep -q 'v1.0.5'; then
+  pass "antigravity mode renders all line 2 segments"
+else
+  fail "antigravity mode renders all line 2 segments (got: $L2)"
+fi
+
+# Test 2r5: Antigravity fallback context calculation when total_input_tokens is 0
+J_AG3='{"model":{"display_name":"X"},"product":"antigravity","context_window":{"context_window_size":100000,"total_input_tokens":0,"total_output_tokens":0,"current_usage":{"input_tokens":5000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":8000}}}'
+OUT=$(echo "$J_AG3" | NO_COLOR=1 ./statusline --antigravity)
+L2=$(echo "$OUT" | sed -n '2p')
+if echo "$L2" | grep -q '15%' && echo "$L2" | grep -q '15k/100k'; then
+  pass "antigravity mode fallback context calculation"
+else
+  fail "antigravity mode fallback context calculation (got: $L2)"
+fi
+
+# Test 2r6: Antigravity cache hit rate correctness (includes cache creation tokens in denom)
+if echo "$L2" | grep -q '53%'; then
+  pass "antigravity mode cache hit rate includes cache creation tokens"
+else
+  fail "antigravity mode cache hit rate includes cache creation tokens (got: $L2, expected to find 53%)"
+fi
+
+# Test 2r7: Antigravity empty string key suppression
+J_AG4='{"model":{"display_name":"X"},"product":"antigravity","conversation_id":"","email":"","plan_tier":"","version":""}'
+OUT=$(echo "$J_AG4" | NO_COLOR=1 ./statusline --antigravity)
+if echo "$OUT" | grep -q '#' || echo "$OUT" | grep -q '✉' || echo "$OUT" | grep -q '⭐' || echo "$OUT" | grep -q 'v'; then
+  fail "antigravity mode did not suppress empty string values (got: $OUT)"
+else
+  pass "antigravity mode suppresses empty string values"
+fi
+
+
+
 # Test 3: Bash mode output
 OUT=$(./statusline --bash 2>&1)
 if echo "$OUT" | grep -q '\$'; then

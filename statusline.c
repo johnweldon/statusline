@@ -33,7 +33,7 @@
 #define GIT_REF_PREFIX "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
 
-enum { MODE_CLAUDE, MODE_BASH, MODE_SUBAGENT };
+enum { MODE_CLAUDE, MODE_BASH, MODE_SUBAGENT, MODE_ANTIGRAVITY };
 enum { FMT_RAW, FMT_PS1 };
 
 static char g_input[BUF_SIZE];
@@ -624,9 +624,11 @@ static void pr_prompt(void) {
 
 // ==================== Claude mode ====================
 
-// Strip leading "Claude " prefix if present; else return input.
+// Strip leading "Claude " or "Gemini " prefix if present; else return input.
 static const char *short_model(const char *full) {
   if (strncmp(full, "Claude ", 7) == 0)
+    return full + 7;
+  if (strncmp(full, "Gemini ", 7) == 0)
     return full + 7;
   return full;
 }
@@ -1259,6 +1261,272 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   seg_emit_line(segs, c, term_columns());
 }
 
+static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n) {
+  seg_t segs[16];
+  memset(segs, 0, sizeof(segs));
+  int c = 0;
+  seg_t *s;
+
+#define PUSH_SEG(prio_val, sep_val) \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
+
+  // Model (always present; prio 0, no leading separator)
+  char model[256];
+  if (!jp_str(buf, t, n, "model.display_name", model, sizeof(model)))
+    snprintf(model, sizeof(model), "Unknown");
+  if (PUSH_SEG(0, SEP_NONE)) {
+    seg_color(s, WHT_F);
+    seg_addf(s, "[%s]", short_model(model));
+    seg_color(s, RST);
+  }
+
+  // Agent State
+  char state[64];
+  if (jp_str(buf, t, n, "agent_state", state, sizeof(state)) && state[0] != '\0') {
+    if (PUSH_SEG(1, SEP_SPACE)) {
+      const char *col = WHT_F;
+      if (strcmp(state, "idle") == 0) {
+        col = DIM;
+      } else if (strcmp(state, "thinking") == 0 || strcmp(state, "working") == 0) {
+        col = CYN_F;
+      }
+      seg_color(s, col);
+      seg_addglyph(s, "\xF0\x9F\xA4\x96", 2); // U+1F916 ROBOT FACE
+      seg_addf(s, " %s", state);
+      seg_color(s, RST);
+    }
+  }
+
+  // Sandbox
+  int sandbox = jp_bool(buf, t, n, "sandbox.enabled", 0);
+  if (sandbox) {
+    if (PUSH_SEG(2, SEP_PIPE)) {
+      seg_color(s, YEL_F);
+      seg_addglyph(s, "\xF0\x9F\x93\xA6", 2); // U+1F4E6 PACKAGE
+      seg_addf(s, " sandbox");
+      seg_color(s, RST);
+    }
+  }
+
+  // Folder (basename), linked to the repo when supported
+  char cur_dir[PATH_MAX_LEN] = "";
+  if (!jp_str(buf, t, n, "workspace.current_dir", cur_dir, sizeof(cur_dir)))
+    jp_str(buf, t, n, "cwd", cur_dir, sizeof(cur_dir));
+  if (cur_dir[0]) {
+    if (PUSH_SEG(0, SEP_SPACE)) {
+      seg_color(s, BRIGHT_BLU);
+      seg_addglyph(s, "\xF0\x9F\x93\x81", 2); // U+1F4C1 FOLDER
+      seg_addf(s, " ");
+      char host[128], owner[128], repo[128];
+      if (hyperlinks_ok() &&
+          jp_str(buf, t, n, "workspace.repo.host", host, sizeof(host)) &&
+          jp_str(buf, t, n, "workspace.repo.owner", owner, sizeof(owner)) &&
+          jp_str(buf, t, n, "workspace.repo.name", repo, sizeof(repo))) {
+        char url[512];
+        snprintf(url, sizeof(url), "https://%s/%s/%s", host, owner, repo);
+        seg_link(s, url, path_basename(cur_dir));
+      } else {
+        seg_addf(s, "%s", path_basename(cur_dir));
+      }
+      seg_color(s, RST);
+    }
+
+    char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
+    if (find_git(cur_dir, gd, wt, sizeof(gd))) {
+      char br[256];
+      if (git_branch_name(gd, br, sizeof(br)) && br[0] != '\0') {
+        if (PUSH_SEG(1, SEP_PIPE)) {
+          seg_color(s, BRIGHT_CYN);
+          seg_addglyph(s, "\xF0\x9F\x8C\xBF", 2); // U+1F33F HERB
+          seg_addf(s, " %s", br);
+          seg_color(s, RST);
+        }
+      }
+    }
+  }
+
+  // Plan Tier
+  char tier[128];
+  if (jp_str(buf, t, n, "plan_tier", tier, sizeof(tier)) && tier[0] != '\0') {
+    if (PUSH_SEG(3, SEP_PIPE)) {
+      seg_color(s, YEL_F);
+      seg_addglyph(s, "\xE2\xAD\x90", 2); // U+2B50 WHITE MEDIUM STAR
+      seg_addf(s, " %s", tier);
+      seg_color(s, RST);
+    }
+  }
+
+  // Conversation ID
+  char conv_id[128];
+  if (jp_str(buf, t, n, "conversation_id", conv_id, sizeof(conv_id)) && conv_id[0] != '\0') {
+    if (PUSH_SEG(4, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "#%.8s", conv_id);
+      seg_color(s, RST);
+    }
+  } else if (jp_str(buf, t, n, "session_id", conv_id, sizeof(conv_id)) && conv_id[0] != '\0') {
+    if (PUSH_SEG(4, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "#%.8s", conv_id);
+      seg_color(s, RST);
+    }
+  }
+
+  // Email
+  char email[128];
+  if (jp_str(buf, t, n, "email", email, sizeof(email)) && email[0] != '\0') {
+    if (PUSH_SEG(5, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addglyph(s, "\xE2\x9C\x89", 1); // U+2709 ENVELOPE
+      seg_addf(s, " %s", email);
+      seg_color(s, RST);
+    }
+  }
+
+  seg_emit_line(segs, c, term_columns());
+#undef PUSH_SEG
+}
+
+static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n) {
+  seg_t segs[16];
+  memset(segs, 0, sizeof(segs));
+  int c = 0;
+  seg_t *s;
+
+#define PUSH_SEG(prio_val, sep_val) \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
+
+  // Context window size & usage
+  long size = jp_long(buf, t, n, "context_window.context_window_size", 0);
+  long in_tok = clamp_tok(
+      jp_long(buf, t, n, "context_window.total_input_tokens", 0));
+  long out_tok = clamp_tok(
+      jp_long(buf, t, n, "context_window.total_output_tokens", 0));
+
+  // Fallback to current_usage input tokens if total_input_tokens is 0
+  if (in_tok == 0) {
+    long in_curr = clamp_tok(jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0));
+    long ccr_curr = clamp_tok(jp_long(buf, t, n, "context_window.current_usage.cache_creation_input_tokens", 0));
+    long cr_curr = clamp_tok(jp_long(buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
+    in_tok = in_curr + ccr_curr + cr_curr;
+  }
+
+  long ctx = jp_pct(buf, t, n, "context_window.used_percentage");
+  if (ctx < 0) {
+    long rem = jp_pct(buf, t, n, "context_window.remaining_percentage");
+    if (rem >= 0)
+      ctx = 100 - rem;
+  }
+  if (ctx < 0 && size > 0 && in_tok > 0)
+    ctx = in_tok >= size ? 100 : (in_tok * 100 / size);
+
+  if (ctx >= 0) {
+    if (PUSH_SEG(0, SEP_NONE)) {
+      seg_progress_bar(s, (int)ctx);
+      seg_addf(s, " ");
+      seg_color(s, WHT_F);
+      seg_addf(s, "%ld%%", ctx);
+      seg_color(s, RST);
+    }
+
+    if (size > 0 && in_tok > 0) {
+      char ut[16], st[16];
+      fmt_tokens(ut, sizeof(ut), in_tok);
+      fmt_tokens(st, sizeof(st), size);
+      if (PUSH_SEG(1, SEP_SPACE)) {
+        seg_color(s, DIM);
+        seg_addf(s, "%s/%s", ut, st);
+        seg_color(s, RST);
+      }
+    }
+  }
+
+  // Output tokens
+  if (out_tok > 0) {
+    if (PUSH_SEG(2, SEP_SPACE)) {
+      char ot[16];
+      fmt_tokens(ot, sizeof(ot), out_tok);
+      seg_color(s, DIM);
+      seg_addf(s, "(%s out)", ot);
+      seg_color(s, RST);
+    }
+  }
+
+  // Cache hit rate (including cache creation tokens for mathematical correctness)
+  long in_curr = clamp_tok(
+      jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0));
+  long ccr_curr = clamp_tok(
+      jp_long(buf, t, n, "context_window.current_usage.cache_creation_input_tokens", 0));
+  long cr_curr = clamp_tok(
+      jp_long(buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
+  long denom = in_curr + ccr_curr + cr_curr;
+  if (denom > 0) {
+    long cache_pct = cr_curr * 100 / denom;
+    if (cache_pct > 0) {
+      if (PUSH_SEG(1, SEP_SPACE)) {
+        seg_color(s, DIM);
+        seg_addglyph(s, "\xE2\x86\xBB", 1); // U+21BB CLOCKWISE OPEN ARROW
+        seg_addf(s, "%ld%%", cache_pct);
+        seg_color(s, RST);
+      }
+    }
+  }
+
+  // Exceeds 200k tokens warning
+  int exceeds_200k = jp_bool(buf, t, n, "exceeds_200k_tokens", 0);
+  if (exceeds_200k) {
+    if (PUSH_SEG(2, SEP_PIPE)) {
+      seg_color(s, YEL_F);
+      seg_addglyph(s, "\xE2\x9A\xA0", 1); // U+26A0 WARNING SIGN
+      seg_addf(s, " >200k");
+      seg_color(s, RST);
+    }
+  }
+
+  // Version
+  char version[64];
+  if (jp_str(buf, t, n, "version", version, sizeof(version)) && version[0] != '\0') {
+    if (PUSH_SEG(3, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "v%s", version);
+      seg_color(s, RST);
+    }
+  }
+
+  // Defensive cost
+  double cost = jp_dbl(buf, t, n, "cost.total_cost_usd", -1.0);
+  if (cost >= 0) {
+    if (PUSH_SEG(1, SEP_PIPE)) {
+      seg_color(s, YEL_F);
+      seg_addf(s, "$%.2f", cost);
+      seg_color(s, RST);
+    }
+  }
+
+  seg_emit_line(segs, c, term_columns());
+#undef PUSH_SEG
+}
+
+static void pr_antigravity_parsed(const char *buf, jsmntok_t *t, int n) {
+  pr_antigravity_line1(buf, t, n);
+  printf("\n");
+  pr_antigravity_line2(buf, t, n);
+}
+
+static void pr_antigravity(void) {
+  jsmn_parser p;
+  jsmntok_t toks[MAX_TOKENS];
+  jsmn_init(&p);
+  int n = jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS);
+  if (n < 1) {
+    color(WHT_F);
+    printf("[Unknown]");
+    color(RST);
+    return;
+  }
+  pr_antigravity_parsed(g_input, toks, n);
+}
+
 static void pr_claude(void) {
   jsmn_parser p;
   jsmntok_t toks[MAX_TOKENS];
@@ -1268,6 +1536,12 @@ static void pr_claude(void) {
     color(WHT_F);
     printf("[Unknown]");
     color(RST);
+    return;
+  }
+  char prod[64] = "";
+  if (jp_str(g_input, toks, n, "product", prod, sizeof(prod)) &&
+      strcmp(prod, "antigravity") == 0) {
+    pr_antigravity_parsed(g_input, toks, n);
     return;
   }
   pr_claude_line1(g_input, toks, n);
@@ -1423,6 +1697,7 @@ static void usage(const char *prog) {
   fprintf(stderr, "Usage: %s [OPTIONS]\n", prog);
   fprintf(stderr, "  --bash         Bash prompt mode\n");
   fprintf(stderr, "  --claude       Claude Code mode (default)\n");
+  fprintf(stderr, "  --antigravity  Antigravity (Gemini) mode\n");
   fprintf(stderr,
           "  --subagent     Subagent status line (JSON-lines output)\n");
   fprintf(stderr, "  --ps1          PS1-compatible escapes\n");
@@ -1440,6 +1715,8 @@ static void parse_args(int argc, char **argv) {
     g_fmt = FMT_PS1;
   } else if (strcmp(prog, "subagentline") == 0) {
     g_mode = MODE_SUBAGENT;
+  } else if (strcmp(prog, "antigravityline") == 0) {
+    g_mode = MODE_ANTIGRAVITY;
   }
   const char *em = getenv("STATUSLINE_MODE");
   if (em) {
@@ -1449,6 +1726,8 @@ static void parse_args(int argc, char **argv) {
       g_mode = MODE_CLAUDE;
     else if (strcmp(em, "subagent") == 0)
       g_mode = MODE_SUBAGENT;
+    else if (strcmp(em, "antigravity") == 0)
+      g_mode = MODE_ANTIGRAVITY;
   }
   const char *es = getenv("SHLVL");
   if (es)
@@ -1458,6 +1737,8 @@ static void parse_args(int argc, char **argv) {
       g_mode = MODE_BASH;
     else if (strcmp(argv[i], "--claude") == 0)
       g_mode = MODE_CLAUDE;
+    else if (strcmp(argv[i], "--antigravity") == 0)
+      g_mode = MODE_ANTIGRAVITY;
     else if (strcmp(argv[i], "--subagent") == 0)
       g_mode = MODE_SUBAGENT;
     else if (strcmp(argv[i], "--ps1") == 0)
@@ -1487,6 +1768,8 @@ int main(int argc, char **argv) {
 
   if (g_mode == MODE_CLAUDE) {
     pr_claude();
+  } else if (g_mode == MODE_ANTIGRAVITY) {
+    pr_antigravity();
   } else if (g_mode == MODE_SUBAGENT) {
     pr_subagent();
   } else {
