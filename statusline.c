@@ -910,39 +910,40 @@ static int term_columns(void) {
 
 // Line 1: [Model] [·effort ✻] 📁 folder | 🌿 branch | [vim] [PR] [agent] [name]
 static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
-  seg_t segs[12];
+  seg_t segs[16];
   memset(segs, 0, sizeof(segs));
   int c = 0;
   seg_t *s;
+
+#define PUSH_SEG(prio_val, sep_val) \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
 
   // Model (always present; prio 0, no leading separator).
   char model[256];
   if (!jp_str(buf, t, n, "model.display_name", model, sizeof(model)))
     snprintf(model, sizeof(model), "Unknown");
-  s = &segs[c++];
-  s->prio = 0;
-  s->sep = SEP_NONE;
-  seg_color(s, WHT_F);
-  seg_addf(s, "[%s]", short_model(model));
-  seg_color(s, RST);
+  if (PUSH_SEG(0, SEP_NONE)) {
+    seg_color(s, WHT_F);
+    seg_addf(s, "[%s]", short_model(model));
+    seg_color(s, RST);
+  }
 
   // Effort + extended-thinking, adjacent to the model name.
   char effort[32];
-  int has_effort = jp_str(buf, t, n, "effort.level", effort, sizeof(effort));
+  int has_effort = jp_str(buf, t, n, "effort.level", effort, sizeof(effort)) && effort[0] != '\0';
   int thinking = jp_bool(buf, t, n, "thinking.enabled", 0);
   if (has_effort || thinking) {
-    s = &segs[c++];
-    s->prio = 2;
-    s->sep = SEP_SPACE;
-    seg_color(s, DIM);
-    if (has_effort)
-      seg_addf(s, "\xC2\xB7%s", effort); // U+00B7 MIDDLE DOT
-    if (thinking) {
+    if (PUSH_SEG(2, SEP_SPACE)) {
+      seg_color(s, DIM);
       if (has_effort)
-        seg_addf(s, " ");
-      seg_addglyph(s, "\xE2\x9C\xBB", 1); // U+273B TEARDROP-SPOKED ASTERISK
+        seg_addf(s, "\xC2\xB7%s", effort); // U+00B7 MIDDLE DOT
+      if (thinking) {
+        if (has_effort)
+          seg_addf(s, " ");
+        seg_addglyph(s, "\xE2\x9C\xBB", 1); // U+273B TEARDROP-SPOKED ASTERISK
+      }
+      seg_color(s, RST);
     }
-    seg_color(s, RST);
   }
 
   // Folder (basename), linked to the repo when supported.
@@ -950,49 +951,46 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
   if (!jp_str(buf, t, n, "workspace.current_dir", cur_dir, sizeof(cur_dir)))
     jp_str(buf, t, n, "cwd", cur_dir, sizeof(cur_dir));
   if (cur_dir[0]) {
-    s = &segs[c++];
-    s->prio = 0;
-    s->sep = SEP_SPACE;
-    seg_color(s, BRIGHT_BLU);
-    seg_addglyph(s, "\xF0\x9F\x93\x81", 2); // U+1F4C1 FOLDER
-    seg_addf(s, " ");
-    char host[128], owner[128], repo[128];
-    if (hyperlinks_ok() &&
-        jp_str(buf, t, n, "workspace.repo.host", host, sizeof(host)) &&
-        jp_str(buf, t, n, "workspace.repo.owner", owner, sizeof(owner)) &&
-        jp_str(buf, t, n, "workspace.repo.name", repo, sizeof(repo))) {
-      char url[512];
-      snprintf(url, sizeof(url), "https://%s/%s/%s", host, owner, repo);
-      seg_link(s, url, path_basename(cur_dir));
-    } else {
-      seg_addf(s, "%s", path_basename(cur_dir));
+    if (PUSH_SEG(0, SEP_SPACE)) {
+      seg_color(s, BRIGHT_BLU);
+      seg_addglyph(s, "\xF0\x9F\x93\x81", 2); // U+1F4C1 FOLDER
+      seg_addf(s, " ");
+      char host[128], owner[128], repo[128];
+      if (hyperlinks_ok() &&
+          jp_str(buf, t, n, "workspace.repo.host", host, sizeof(host)) &&
+          jp_str(buf, t, n, "workspace.repo.owner", owner, sizeof(owner)) &&
+          jp_str(buf, t, n, "workspace.repo.name", repo, sizeof(repo))) {
+        char url[512];
+        snprintf(url, sizeof(url), "https://%s/%s/%s", host, owner, repo);
+        seg_link(s, url, path_basename(cur_dir));
+      } else {
+        seg_addf(s, "%s", path_basename(cur_dir));
+      }
+      seg_color(s, RST);
     }
-    seg_color(s, RST);
 
     char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
     if (find_git(cur_dir, gd, wt, sizeof(gd))) {
       char br[256];
-      if (git_branch_name(gd, br, sizeof(br))) {
-        s = &segs[c++];
-        s->prio = 1;
-        s->sep = SEP_PIPE;
-        seg_color(s, BRIGHT_CYN);
-        seg_addglyph(s, "\xF0\x9F\x8C\xBF", 2); // U+1F33F HERB
-        seg_addf(s, " %s", br);
-        seg_color(s, RST);
+      if (git_branch_name(gd, br, sizeof(br)) && br[0] != '\0') {
+        if (PUSH_SEG(1, SEP_PIPE)) {
+          seg_color(s, BRIGHT_CYN);
+          seg_addglyph(s, "\xF0\x9F\x8C\xBF", 2); // U+1F33F HERB
+          seg_addf(s, " %s", br);
+          seg_color(s, RST);
+        }
       }
     }
   }
 
   // Vim mode.
   char vim[32];
-  if (jp_str(buf, t, n, "vim.mode", vim, sizeof(vim))) {
-    s = &segs[c++];
-    s->prio = 2;
-    s->sep = SEP_PIPE;
-    seg_color(s, DIM);
-    seg_addf(s, "%s", vim);
-    seg_color(s, RST);
+  if (jp_str(buf, t, n, "vim.mode", vim, sizeof(vim)) && vim[0] != '\0') {
+    if (PUSH_SEG(2, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "%s", vim);
+      seg_color(s, RST);
+    }
   }
 
   // Open PR badge, linked to the PR url when supported.
@@ -1012,53 +1010,50 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
       col = DIM, mark = " draft";
     char label[64];
     snprintf(label, sizeof(label), "#%ld%s", pr_num, mark);
-    s = &segs[c++];
-    s->prio = 3;
-    s->sep = SEP_PIPE;
-    seg_color(s, col);
-    if (url[0] && hyperlinks_ok())
-      seg_link(s, url, label);
-    else
-      seg_addf(s, "%s", label);
-    seg_color(s, RST);
+    if (PUSH_SEG(3, SEP_PIPE)) {
+      seg_color(s, col);
+      if (url[0] && hyperlinks_ok())
+        seg_link(s, url, label);
+      else
+        seg_addf(s, "%s", label);
+      seg_color(s, RST);
+    }
   }
 
   // Named agent.
   char agent[128];
-  if (jp_str(buf, t, n, "agent.name", agent, sizeof(agent))) {
-    s = &segs[c++];
-    s->prio = 3;
-    s->sep = SEP_PIPE;
-    seg_color(s, CYN_F);
-    seg_addglyph(s, "\xF0\x9F\xA4\x96", 2); // U+1F916 ROBOT FACE
-    seg_addf(s, " %s", agent);
-    seg_color(s, RST);
+  if (jp_str(buf, t, n, "agent.name", agent, sizeof(agent)) && agent[0] != '\0') {
+    if (PUSH_SEG(3, SEP_PIPE)) {
+      seg_color(s, CYN_F);
+      seg_addglyph(s, "\xF0\x9F\xA4\x96", 2); // U+1F916 ROBOT FACE
+      seg_addf(s, " %s", agent);
+      seg_color(s, RST);
+    }
   }
 
   // Custom session name.
   char sess[128];
-  if (jp_str(buf, t, n, "session_name", sess, sizeof(sess))) {
-    s = &segs[c++];
-    s->prio = 4;
-    s->sep = SEP_PIPE;
-    seg_color(s, DIM);
-    seg_addf(s, "%s", sess);
-    seg_color(s, RST);
+  if (jp_str(buf, t, n, "session_name", sess, sizeof(sess)) && sess[0] != '\0') {
+    if (PUSH_SEG(4, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "%s", sess);
+      seg_color(s, RST);
+    }
   }
 
   // Output style (skip the implicit default to avoid noise).
   char style[64];
   if (jp_str(buf, t, n, "output_style.name", style, sizeof(style)) &&
-      strcmp(style, "default") != 0) {
-    s = &segs[c++];
-    s->prio = 5;
-    s->sep = SEP_PIPE;
-    seg_color(s, DIM);
-    seg_addf(s, "%s", style);
-    seg_color(s, RST);
+      style[0] != '\0' && strcmp(style, "default") != 0) {
+    if (PUSH_SEG(5, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "%s", style);
+      seg_color(s, RST);
+    }
   }
 
   seg_emit_line(segs, c, term_columns());
+#undef PUSH_SEG
 }
 
 // "2h12m" / "13m" / "<1m" from a positive second count. Empty if secs <= 0.
@@ -1114,10 +1109,13 @@ static long clamp_tok(long v) { return (v < 0 || v > 100000000L) ? 0 : v; }
 // Line 2: bar N% used/size | $cost | +a/-r | 5h:N%(reset) 7d:M% | ⏱ api/total
 // ↻%
 static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
-  seg_t segs[8];
+  seg_t segs[16];
   memset(segs, 0, sizeof(segs));
   int c = 0;
   seg_t *s;
+
+#define PUSH_SEG(prio_val, sep_val) \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
 
   // Read token data once: used downstream for the bar, absolute counts,
   // the token-based fallback %, and the cache hit rate.
@@ -1143,84 +1141,79 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   if (ctx < 0 && size > 0 && used_tok > 0)
     ctx = used_tok >= size ? 100 : (used_tok * 100 / size);
   if (ctx >= 0) {
-    s = &segs[c++];
-    s->prio = 0;
-    s->sep = SEP_NONE;
-    seg_progress_bar(s, (int)ctx);
-    seg_addf(s, " ");
-    seg_color(s, WHT_F);
-    seg_addf(s, "%ld%%", ctx);
-    seg_color(s, RST);
+    if (PUSH_SEG(0, SEP_NONE)) {
+      seg_progress_bar(s, (int)ctx);
+      seg_addf(s, " ");
+      seg_color(s, WHT_F);
+      seg_addf(s, "%ld%%", ctx);
+      seg_color(s, RST);
+    }
     if (size > 0 && used_tok > 0) {
       char ut[16], st[16];
       fmt_tokens(ut, sizeof(ut), used_tok);
       fmt_tokens(st, sizeof(st), size);
-      s = &segs[c++];
-      s->prio = 3;
-      s->sep = SEP_SPACE;
-      seg_color(s, DIM);
-      seg_addf(s, "%s/%s", ut, st);
-      seg_color(s, RST);
+      if (PUSH_SEG(3, SEP_SPACE)) {
+        seg_color(s, DIM);
+        seg_addf(s, "%s/%s", ut, st);
+        seg_color(s, RST);
+      }
     }
   }
 
   // Cost (always shown when present).
   double cost = jp_dbl(buf, t, n, "cost.total_cost_usd", -1.0);
   if (cost >= 0) {
-    s = &segs[c++];
-    s->prio = 1;
-    s->sep = SEP_PIPE;
-    seg_color(s, YEL_F);
-    seg_addf(s, "$%.2f", cost);
-    seg_color(s, RST);
+    if (PUSH_SEG(1, SEP_PIPE)) {
+      seg_color(s, YEL_F);
+      seg_addf(s, "$%.2f", cost);
+      seg_color(s, RST);
+    }
   }
 
   // Lines added / removed.
   long added = jp_long(buf, t, n, "cost.total_lines_added", 0);
   long removed = jp_long(buf, t, n, "cost.total_lines_removed", 0);
   if (added > 0 || removed > 0) {
-    s = &segs[c++];
-    s->prio = 4;
-    s->sep = SEP_PIPE;
-    seg_color(s, GRN_F);
-    seg_addf(s, "+%ld", added);
-    seg_color(s, RST);
-    seg_addf(s, "/");
-    seg_color(s, RED_F);
-    seg_addf(s, "-%ld", removed);
-    seg_color(s, RST);
+    if (PUSH_SEG(4, SEP_PIPE)) {
+      seg_color(s, GRN_F);
+      seg_addf(s, "+%ld", added);
+      seg_color(s, RST);
+      seg_addf(s, "/");
+      seg_color(s, RED_F);
+      seg_addf(s, "-%ld", removed);
+      seg_color(s, RST);
+    }
   }
 
   // Rate limits: 5-hour (with reset countdown) and 7-day windows.
   long rate5 = jp_pct(buf, t, n, "rate_limits.five_hour.used_percentage");
   long rate7 = jp_pct(buf, t, n, "rate_limits.seven_day.used_percentage");
   if (rate5 >= 0 || rate7 >= 0) {
-    s = &segs[c++];
-    s->prio = 2;
-    s->sep = SEP_PIPE;
-    int first_rl = 1;
-    if (rate5 >= 0) {
-      const char *rc = (rate5 < 50) ? GRN_F : (rate5 < 80) ? YEL_F : RED_F;
-      seg_color(s, rc);
-      seg_addf(s, "5h:%ld%%", rate5);
-      seg_color(s, RST);
-      char cd[16];
-      fmt_countdown(cd, sizeof(cd),
-                    secs_until(buf, t, n, "rate_limits.five_hour.resets_at"));
-      if (cd[0]) {
-        seg_color(s, DIM);
-        seg_addf(s, "(%s)", cd);
+    if (PUSH_SEG(2, SEP_PIPE)) {
+      int first_rl = 1;
+      if (rate5 >= 0) {
+        const char *rc = (rate5 < 50) ? GRN_F : (rate5 < 80) ? YEL_F : RED_F;
+        seg_color(s, rc);
+        seg_addf(s, "5h:%ld%%", rate5);
+        seg_color(s, RST);
+        char cd[16];
+        fmt_countdown(cd, sizeof(cd),
+                      secs_until(buf, t, n, "rate_limits.five_hour.resets_at"));
+        if (cd[0]) {
+          seg_color(s, DIM);
+          seg_addf(s, "(%s)", cd);
+          seg_color(s, RST);
+        }
+        first_rl = 0;
+      }
+      if (rate7 >= 0) {
+        if (!first_rl)
+          seg_addf(s, " ");
+        const char *rc = (rate7 < 50) ? GRN_F : (rate7 < 80) ? YEL_F : RED_F;
+        seg_color(s, rc);
+        seg_addf(s, "7d:%ld%%", rate7);
         seg_color(s, RST);
       }
-      first_rl = 0;
-    }
-    if (rate7 >= 0) {
-      if (!first_rl)
-        seg_addf(s, " ");
-      const char *rc = (rate7 < 50) ? GRN_F : (rate7 < 80) ? YEL_F : RED_F;
-      seg_color(s, rc);
-      seg_addf(s, "7d:%ld%%", rate7);
-      seg_color(s, RST);
     }
   }
 
@@ -1231,34 +1224,33 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   fmt_duration_ms(api_s, sizeof(api_s), api_ms);
   fmt_duration_ms(tot_s, sizeof(tot_s), tot_ms);
   if (tot_s[0]) {
-    s = &segs[c++];
-    s->prio = 3;
-    s->sep = SEP_PIPE;
-    seg_color(s, CYN_F);
-    seg_addglyph(s, "\xE2\x8F\xB1", 1); // U+23F1 STOPWATCH
-    if (api_s[0])
-      seg_addf(s, " %s/%s", api_s, tot_s);
-    else
-      seg_addf(s, " %s", tot_s);
-    seg_color(s, RST);
-  }
-
-  // Cache hit rate: read / (input + read). Reuses tokens read at top.
-  long denom = in_tok + cr_tok;
-  if (denom > 0) {
-    long cache_pct = cr_tok * 100 / denom;
-    if (cache_pct > 0) {
-      s = &segs[c++];
-      s->prio = 5;
-      s->sep = SEP_SPACE;
-      seg_color(s, DIM);
-      seg_addglyph(s, "\xE2\x86\xBB", 1); // U+21BB CLOCKWISE OPEN ARROW
-      seg_addf(s, "%ld%%", cache_pct);
+    if (PUSH_SEG(3, SEP_PIPE)) {
+      seg_color(s, CYN_F);
+      seg_addglyph(s, "\xE2\x8F\xB1", 1); // U+23F1 STOPWATCH
+      if (api_s[0])
+        seg_addf(s, " %s/%s", api_s, tot_s);
+      else
+        seg_addf(s, " %s", tot_s);
       seg_color(s, RST);
     }
   }
 
+  // Cache hit rate: read / (input + cache_creation + read). Reuses tokens read at top.
+  long denom = in_tok + ccr_tok + cr_tok;
+  if (denom > 0) {
+    long cache_pct = cr_tok * 100 / denom;
+    if (cache_pct > 0) {
+      if (PUSH_SEG(5, SEP_SPACE)) {
+        seg_color(s, DIM);
+        seg_addglyph(s, "\xE2\x86\xBB", 1); // U+21BB CLOCKWISE OPEN ARROW
+        seg_addf(s, "%ld%%", cache_pct);
+        seg_color(s, RST);
+      }
+    }
+  }
+
   seg_emit_line(segs, c, term_columns());
+#undef PUSH_SEG
 }
 
 static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n) {

@@ -376,7 +376,22 @@ if echo "$OUT" | grep -q '#' || echo "$OUT" | grep -q '✉' || echo "$OUT" | gre
 else
   pass "antigravity mode suppresses empty string values"
 fi
+# Test 2s1: Claude mode cache hit rate correctness (includes cache creation tokens in denom)
+OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"context_window_size":200000,"current_usage":{"input_tokens":15000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":80000}}}' | ./statusline 2>&1)
+if echo "$OUT" | grep -q '82%'; then
+  pass "claude mode cache hit rate includes cache creation tokens"
+else
+  fail "claude mode cache hit rate includes cache creation tokens (got: $OUT, expected to find 82%)"
+fi
 
+# Test 2s2: Claude mode empty string key suppression
+J_CL_EMPTY='{"model":{"display_name":"X"},"vim":{"mode":""},"agent":{"name":""},"session_name":""}'
+OUT=$(echo "$J_CL_EMPTY" | NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q '🤖'; then
+  fail "claude mode did not suppress empty string values (got: $OUT)"
+else
+  pass "claude mode suppresses empty string values"
+fi
 
 
 # Test 3: Bash mode output
