@@ -728,6 +728,8 @@ if [ "$TOK" = "~/./a/b/c/d/ee" ]; then
 else
   fail "bash cwd dotdot-name interior (got: $TOK)"
 fi
+rm -rf "$TMPD"
+
 # Test 24: path_basename trailing slash stripping
 OUT=$(echo '{"model":{"display_name":"X"},"workspace":{"current_dir":"/no/such/proj/"}}' | ./statusline 2>&1)
 if echo "$OUT" | grep -F "proj/" || echo "$OUT" | grep -F "proj//"; then

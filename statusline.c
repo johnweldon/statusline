@@ -909,6 +909,10 @@ static int term_columns(void) {
   struct winsize w;
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
     return w.ws_col;
+  if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
+    return w.ws_col;
+  if (ioctl(STDIN_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
+    return w.ws_col;
   const char *c = getenv("COLUMNS");
   if (!c || !*c)
     return 0;
@@ -1256,7 +1260,7 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   // Cache hit rate: read / (input + cache_creation + read). Reuses tokens read at top.
   long denom = in_tok + ccr_tok + cr_tok;
   if (denom > 0) {
-    long cache_pct = cr_tok * 100 / denom;
+    long cache_pct = (long)((long long)cr_tok * 100 / denom);
     if (cache_pct > 0) {
       if (PUSH_SEG(5, SEP_SPACE)) {
         seg_color(s, DIM);
@@ -1475,7 +1479,7 @@ static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n,
       jp_long(buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
   long denom = in_curr + ccr_curr + cr_curr;
   if (denom > 0) {
-    long cache_pct = cr_curr * 100 / denom;
+    long cache_pct = (long)((long long)cr_curr * 100 / denom);
     if (cache_pct > 0) {
       if (PUSH_SEG(1, SEP_SPACE)) {
         seg_color(s, DIM);
