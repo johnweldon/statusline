@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -664,6 +665,7 @@ static void fmt_tokens(char *out, size_t sz, long n) {
 }
 
 static const char *path_basename(const char *p) {
+  static char buf[PATH_MAX_LEN];
   size_t len = strlen(p);
   while (len > 1 && p[len - 1] == '/')
     len--;
@@ -671,7 +673,12 @@ static const char *path_basename(const char *p) {
   for (size_t i = 0; i < len; i++)
     if (p[i] == '/')
       s = p + i + 1;
-  return s;
+  size_t blen = (p + len) - s;
+  if (blen >= sizeof(buf))
+    blen = sizeof(buf) - 1;
+  memcpy(buf, s, blen);
+  buf[blen] = '\0';
+  return buf;
 }
 
 // ==================== segments (width-aware emission) ====================
@@ -898,6 +905,9 @@ static void seg_emit_line(seg_t *segs, int count, int budget) {
 
 // COLUMNS budget for width-aware truncation; <=0 means unlimited.
 static int term_columns(void) {
+  struct winsize w;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
+    return w.ws_col;
   const char *c = getenv("COLUMNS");
   if (!c || !*c)
     return 0;
