@@ -1609,10 +1609,13 @@ static void pr_subagent_row(const char *buf, jsmntok_t *t, int n, int el,
     jp_str_from(buf, t, n, el, "type", label, sizeof(label));
   long tokc = jp_long_from(buf, t, n, el, "tokenCount", -1);
 
-  seg_t segs[4];
+  seg_t segs[8];
   memset(segs, 0, sizeof(segs));
   int c = 0;
   seg_t *s;
+
+#define PUSH_SEG(prio_val, sep_val) \
+  (c < 8 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
 
   const char *col = DIM, *gl = "\xC2\xB7"; // U+00B7 pending/unknown
   if (strstr(status, "complet") || strstr(status, "done") ||
@@ -1624,38 +1627,34 @@ static void pr_subagent_row(const char *buf, jsmntok_t *t, int n, int el,
   else if (strstr(status, "run") || strstr(status, "progress") ||
            strstr(status, "active") || strstr(status, "work"))
     col = CYN_F, gl = "\xE2\x96\xB8"; // U+25B8 BLACK RIGHT-POINTING TRIANGLE
-  s = &segs[c++];
-  s->prio = 0;
-  s->sep = SEP_NONE;
-  seg_color(s, col);
-  seg_addglyph(s, gl, 1);
-  seg_color(s, RST);
-
-  if (name[0]) {
-    s = &segs[c++];
-    s->prio = 0;
-    s->sep = SEP_SPACE;
-    seg_color(s, WHT_F);
-    seg_addf(s, "%s", name);
+  if (PUSH_SEG(0, SEP_NONE)) {
+    seg_color(s, col);
+    seg_addglyph(s, gl, 1);
     seg_color(s, RST);
   }
+
+  if (name[0]) {
+    if (PUSH_SEG(0, SEP_SPACE)) {
+      seg_color(s, WHT_F);
+      seg_addf(s, "%s", name);
+      seg_color(s, RST);
+    }
+  }
   if (label[0]) {
-    s = &segs[c++];
-    s->prio = 2;
-    s->sep = SEP_SPACE;
-    seg_color(s, DIM);
-    seg_addf(s, "\xC2\xB7 %s", label);
-    seg_color(s, RST);
+    if (PUSH_SEG(2, SEP_SPACE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "\xC2\xB7 %s", label);
+      seg_color(s, RST);
+    }
   }
   if (tokc >= 0) {
     char tk[16];
     fmt_tokens(tk, sizeof(tk), tokc);
-    s = &segs[c++];
-    s->prio = 1;
-    s->sep = SEP_SPACE;
-    seg_color(s, DIM);
-    seg_addf(s, "\xC2\xB7 %s", tk);
-    seg_color(s, RST);
+    if (PUSH_SEG(1, SEP_SPACE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "\xC2\xB7 %s", tk);
+      seg_color(s, RST);
+    }
   }
 
   char body[4096], ebody[8192], eid[256];
@@ -1663,6 +1662,7 @@ static void pr_subagent_row(const char *buf, jsmntok_t *t, int n, int el,
   json_escape(ebody, sizeof(ebody), body);
   json_escape(eid, sizeof(eid), id);
   printf("{\"id\":\"%s\",\"content\":\"%s\"}\n", eid, ebody);
+#undef PUSH_SEG
 }
 
 static void pr_subagent(void) {
