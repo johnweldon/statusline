@@ -312,12 +312,22 @@ else
   fail "antigravity mode parses model name with explicit flag (got: $OUT)"
 fi
 
-# Test 2r2: Antigravity mode auto-detection (no flags, default Claude mode detects product)
-OUT=$(echo '{"model":{"display_name":"Gemini 3.5 Flash"},"product":"antigravity"}' | ./statusline 2>&1)
-if echo "$OUT" | grep -q '\[3.5 Flash\]'; then
-  pass "antigravity mode auto-detected by product field"
+# Test 2r2: Antigravity mode auto-detection accepts legacy product value
+OUT=$(echo '{"model":{"display_name":"Gemini 3.5 Flash"},"product":"antigravity","agent_state":"working"}' | NO_COLOR=1 ./statusline 2>&1)
+if echo "$OUT" | grep -q '\[3.5 Flash\]' && echo "$OUT" | grep -q 'working'; then
+  pass "antigravity mode auto-detected by legacy product field"
 else
-  fail "antigravity mode auto-detected by product field (got: $OUT)"
+  fail "antigravity mode auto-detected by legacy product field (got: $OUT)"
+fi
+
+# Test 2r2b: Antigravity mode auto-detection accepts official CLI product value
+OUT=$(echo '{"model":{"display_name":"Gemini 3.5 Flash"},"product":"antigravity-cli","agent_state":"working","plan_tier":"Pro"}' | NO_COLOR=1 ./statusline 2>&1)
+if echo "$OUT" | grep -q '\[3.5 Flash\]' &&
+   echo "$OUT" | grep -q 'working' &&
+   echo "$OUT" | grep -q 'Pro'; then
+  pass "antigravity mode auto-detected by cli product field"
+else
+  fail "antigravity mode auto-detected by cli product field (got: $OUT)"
 fi
 
 # Test 2r3: Antigravity mode renders agent state, plan tier, conversation id, email, sandbox
@@ -376,6 +386,46 @@ if echo "$OUT" | grep -q '#' || echo "$OUT" | grep -q '✉' || echo "$OUT" | gre
 else
   pass "antigravity mode suppresses empty string values"
 fi
+
+# Test 2r8: Antigravity mode uses vcs.branch from the payload
+J_AG_BRANCH='{"model":{"display_name":"X"},"product":"antigravity","workspace":{"current_dir":"/no/such/proj"},"vcs":{"branch":"payload-branch"}}'
+OUT=$(echo "$J_AG_BRANCH" | NO_COLOR=1 ./statusline --antigravity)
+L1=$(echo "$OUT" | sed -n '1p')
+if echo "$L1" | grep -q 'payload-branch'; then
+  pass "antigravity mode renders vcs.branch"
+else
+  fail "antigravity mode renders vcs.branch (got: $L1)"
+fi
+
+# Test 2r9: Antigravity terminal_width overrides ambient COLUMNS
+J_AG_WIDTH='{"model":{"display_name":"Gemini"},"product":"antigravity","agent_state":"working","plan_tier":"Pro","email":"developer@example.com","terminal_width":24,"workspace":{"current_dir":"/no/such/proj"}}'
+OUT=$(echo "$J_AG_WIDTH" | NO_COLOR=1 COLUMNS=1000 ./statusline --antigravity)
+L1=$(echo "$OUT" | sed -n '1p')
+if echo "$L1" | grep -q '\[Gemini\]' &&
+   echo "$L1" | grep -q 'proj' &&
+   ! echo "$L1" | grep -q 'working' &&
+   ! echo "$L1" | grep -q 'developer@example.com'; then
+  pass "antigravity mode uses terminal_width for truncation"
+else
+  fail "antigravity mode uses terminal_width for truncation (got: $L1)"
+fi
+
+# Test 2r10: Antigravity mode tolerates large official payload arrays
+BIG_AG='{"model":{"display_name":"Gemini"},"product":"antigravity-cli","agent_state":"working","context_window":{"context_window_size":1000000,"total_input_tokens":10,"used_percentage":1},"background_tasks":['
+for i in $(seq 1 80); do
+  [ "$i" -gt 1 ] && BIG_AG="$BIG_AG,"
+  BIG_AG="$BIG_AG{\"name\":\"task$i\",\"status\":\"running\",\"index\":$i}"
+done
+BIG_AG="$BIG_AG]}"
+OUT=$(printf '%s' "$BIG_AG" | NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q 'working' &&
+   echo "$OUT" | grep -q '1%' &&
+   ! echo "$OUT" | grep -q 'Unknown'; then
+  pass "antigravity mode handles large payload arrays"
+else
+  fail "antigravity mode handles large payload arrays (got: $OUT)"
+fi
+
 # Test 2s1: Claude mode cache hit rate correctness (includes cache creation tokens in denom)
 OUT=$(echo '{"model":{"display_name":"X"},"context_window":{"context_window_size":200000,"current_usage":{"input_tokens":15000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":80000}}}' | ./statusline 2>&1)
 if echo "$OUT" | grep -q '82%'; then

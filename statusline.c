@@ -31,6 +31,7 @@
 // headroom for added_dirs[] and future fields. Subagent tasks[] is far larger.
 #define MAX_TOKENS 512
 #define MAX_TOKENS_SUB 4096
+#define MAX_TOKENS_ANTIGRAVITY 4096
 #define GIT_REF_PREFIX "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
 
@@ -918,6 +919,13 @@ static int term_columns(void) {
   return (int)v;
 }
 
+static int json_terminal_width(const char *buf, jsmntok_t *t, int n) {
+  long v = jp_long(buf, t, n, "terminal_width", 0);
+  if (v > 0 && v <= 100000)
+    return (int)v;
+  return term_columns();
+}
+
 // Line 1: [Model] [·effort ✻] 📁 folder | 🌿 branch | [vim] [PR] [agent] [name]
 static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
   seg_t segs[16];
@@ -1263,7 +1271,8 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
 #undef PUSH_SEG
 }
 
-static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n) {
+static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n,
+                                 int cols) {
   seg_t segs[16];
   memset(segs, 0, sizeof(segs));
   int c = 0;
@@ -1333,16 +1342,18 @@ static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n) {
       seg_color(s, RST);
     }
 
-    char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
-    if (find_git(cur_dir, gd, wt, sizeof(gd))) {
-      char br[256];
-      if (git_branch_name(gd, br, sizeof(br)) && br[0] != '\0') {
-        if (PUSH_SEG(1, SEP_PIPE)) {
-          seg_color(s, BRIGHT_CYN);
-          seg_addglyph(s, "\xF0\x9F\x8C\xBF", 2); // U+1F33F HERB
-          seg_addf(s, " %s", br);
-          seg_color(s, RST);
-        }
+    char br[256] = "";
+    if (!jp_str(buf, t, n, "vcs.branch", br, sizeof(br)) || br[0] == '\0') {
+      char gd[PATH_MAX_LEN], wt[PATH_MAX_LEN];
+      if (find_git(cur_dir, gd, wt, sizeof(gd)))
+        git_branch_name(gd, br, sizeof(br));
+    }
+    if (br[0] != '\0') {
+      if (PUSH_SEG(1, SEP_PIPE)) {
+        seg_color(s, BRIGHT_CYN);
+        seg_addglyph(s, "\xF0\x9F\x8C\xBF", 2); // U+1F33F HERB
+        seg_addf(s, " %s", br);
+        seg_color(s, RST);
       }
     }
   }
@@ -1385,11 +1396,12 @@ static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n) {
     }
   }
 
-  seg_emit_line(segs, c, term_columns());
+  seg_emit_line(segs, c, cols);
 #undef PUSH_SEG
 }
 
-static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n) {
+static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n,
+                                 int cols) {
   seg_t segs[16];
   memset(segs, 0, sizeof(segs));
   int c = 0;
@@ -1505,21 +1517,28 @@ static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n) {
     }
   }
 
-  seg_emit_line(segs, c, term_columns());
+  seg_emit_line(segs, c, cols);
 #undef PUSH_SEG
 }
 
+static int is_antigravity_product(const char *prod) {
+  return strcmp(prod, "antigravity") == 0 ||
+         strcmp(prod, "antigravity-cli") == 0;
+}
+
 static void pr_antigravity_parsed(const char *buf, jsmntok_t *t, int n) {
-  pr_antigravity_line1(buf, t, n);
+  int cols = json_terminal_width(buf, t, n);
+  pr_antigravity_line1(buf, t, n, cols);
   printf("\n");
-  pr_antigravity_line2(buf, t, n);
+  pr_antigravity_line2(buf, t, n, cols);
 }
 
 static void pr_antigravity(void) {
   jsmn_parser p;
-  jsmntok_t toks[MAX_TOKENS];
+  static jsmntok_t toks[MAX_TOKENS_ANTIGRAVITY];
   jsmn_init(&p);
-  int n = jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS);
+  int n = jsmn_parse(&p, g_input, strlen(g_input), toks,
+                     MAX_TOKENS_ANTIGRAVITY);
   if (n < 1) {
     color(WHT_F);
     printf("[Unknown]");
@@ -1529,12 +1548,30 @@ static void pr_antigravity(void) {
   pr_antigravity_parsed(g_input, toks, n);
 }
 
+static int pr_antigravity_if_detected(void) {
+  jsmn_parser p;
+  static jsmntok_t toks[MAX_TOKENS_ANTIGRAVITY];
+  jsmn_init(&p);
+  int n = jsmn_parse(&p, g_input, strlen(g_input), toks,
+                     MAX_TOKENS_ANTIGRAVITY);
+  if (n < 1)
+    return 0;
+  char prod[64] = "";
+  if (!jp_str(g_input, toks, n, "product", prod, sizeof(prod)) ||
+      !is_antigravity_product(prod))
+    return 0;
+  pr_antigravity_parsed(g_input, toks, n);
+  return 1;
+}
+
 static void pr_claude(void) {
   jsmn_parser p;
   jsmntok_t toks[MAX_TOKENS];
   jsmn_init(&p);
   int n = jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS);
   if (n < 1) {
+    if (pr_antigravity_if_detected())
+      return;
     color(WHT_F);
     printf("[Unknown]");
     color(RST);
@@ -1542,7 +1579,7 @@ static void pr_claude(void) {
   }
   char prod[64] = "";
   if (jp_str(g_input, toks, n, "product", prod, sizeof(prod)) &&
-      strcmp(prod, "antigravity") == 0) {
+      is_antigravity_product(prod)) {
     pr_antigravity_parsed(g_input, toks, n);
     return;
   }

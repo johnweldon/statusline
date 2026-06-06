@@ -30,6 +30,7 @@ echo '{"model":{"display_name":"Opus 4.7"}}' | statusline
 ```
 --bash         Bash prompt mode
 --claude       Claude Code mode (default)
+--antigravity  Antigravity (Gemini) mode
 --subagent     Subagent status line (JSON-lines output)
 --ps1          PS1-compatible escape sequences
 --exit-code=N  Last command exit code
@@ -96,7 +97,7 @@ This copies the built `statusline` binary to `~/.gemini/antigravity-cli/statusli
 
 *(Alternatively, you can run `make install` or `make install-local` and configure with `/statusline ~/.local/bin/statusline` or `/statusline /usr/local/bin/statusline`)*.
 
-The statusline binary auto-detects if the input JSON is from Antigravity (by checking the `"product"` field on stdin) and automatically formats the output for Antigravity (Gemini).
+The statusline binary auto-detects if the input JSON is from Antigravity (by checking the `"product"` field on stdin for `antigravity` or `antigravity-cli`) and automatically formats the output for Antigravity (Gemini).
 
 ## Display
 
@@ -134,6 +135,8 @@ Line 1 shows the model name (with "Gemini " prefix stripped), active agent state
 
 Line 2 shows context window usage percentage, absolute tokens (input/total), output tokens, cache hit rate (`↻ 99%`), a warning badge if context exceeds 200k tokens (`⚠️ >200k`), and the antigravity CLI version.
 
+Antigravity mode uses the payload's `terminal_width` field for width-aware truncation when present, falling back to terminal detection or `COLUMNS`.
+
 **Subagent mode** (`--subagent`): reads the `subagentStatusLine` JSON (base fields plus `columns` and a `tasks[]` array) and writes one JSON line per row to override, e.g.:
 
 ```
@@ -149,7 +152,7 @@ A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task
 - Stash indicator from `.git/refs/stash`
 - K8s context/namespace from `$KUBECONFIG` or `~/.kube/config`
 - Claude Code: model, effort/thinking, folder (repo link), branch, vim mode, PR badge, agent, session name, output style, context bar, cost, lines, 5h/7d rate limits with reset countdown, duration, cache hit rate
-- Width-aware truncation driven by `COLUMNS` (Claude/subagent modes)
+- Width-aware truncation driven by `COLUMNS` (Claude/subagent modes) or `terminal_width` (Antigravity mode)
 - OSC 8 clickable links (repo, PR) when the terminal supports them
 - Subagent status line (`--subagent`): per-task JSON-lines row overrides
 - Virtualenv, SSH indicator, shell level (bash mode)
@@ -162,7 +165,7 @@ A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task
 | Variable           | Description                                       |
 | ------------------ | ------------------------------------------------- |
 | `NO_COLOR`         | Disable colored output (any value)                |
-| `STATUSLINE_MODE`  | Default mode: `bash`, `claude`, or `subagent`     |
+| `STATUSLINE_MODE`  | Default mode: `bash`, `claude`, `antigravity`, or `subagent` |
 | `COLUMNS`          | Terminal width; drives width-aware truncation     |
 | `FORCE_HYPERLINK`  | Force OSC 8 links even if the terminal is unknown |
 | `TERM_PROGRAM`     | Used to detect OSC 8 hyperlink support            |
