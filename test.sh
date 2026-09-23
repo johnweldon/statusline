@@ -5,6 +5,12 @@
 # can commit without hitting commit.gpgsign / signing-key prompts.
 export GIT_CONFIG_GLOBAL=/dev/null
 
+# Isolate from the caller's Claude Code login so the account segment only
+# appears in the tests that set it up.
+export CLAUDE_CONFIG_DIR=/nonexistent/statusline-test
+unset STATUSLINE_ACCOUNT STATUSLINE_ACCOUNT_LABEL ANTHROPIC_API_KEY
+unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX
+
 PASS=0
 FAIL=0
 
@@ -481,6 +487,36 @@ if echo "$OUT" | grep -q '\[X\] ↯' && echo "$OUT" | grep -q 'wt:feat-a' &&
   pass "claude mode fast mode and worktree indicators"
 else
   fail "claude mode fast mode and worktree indicators (got: $OUT / $OUT2)"
+fi
+
+# Test 2s1f: account segment from oauthAccount in $CLAUDE_CONFIG_DIR/.claude.json
+ACCT=$(mktemp -d)
+printf '%s\n' '{"numStartups":3,"projects":{"/x":{"a":"}{"}},"oauthAccount":{"emailAddress":"dev@example.com","organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_20x","ccOnboardingFlags":{}},"z":1}' > "$ACCT/.claude.json"
+J='{"model":{"display_name":"X"}}'
+OUT=$(echo "$J" | CLAUDE_CONFIG_DIR="$ACCT" NO_COLOR=1 ./statusline | sed -n '1p')
+ORG=$(echo "$J" | CLAUDE_CONFIG_DIR="$ACCT" STATUSLINE_ACCOUNT=org NO_COLOR=1 ./statusline | sed -n '1p')
+OFF=$(echo "$J" | CLAUDE_CONFIG_DIR="$ACCT" STATUSLINE_ACCOUNT=off NO_COLOR=1 ./statusline | sed -n '1p')
+LBL=$(echo "$J" | CLAUDE_CONFIG_DIR="$ACCT" STATUSLINE_ACCOUNT_LABEL=work NO_COLOR=1 ./statusline | sed -n '1p')
+if [ "$OUT" = "[X] | dev@example.com (Max 20x)" ] && [ "$ORG" = "[X] | Max 20x" ] &&
+  [ "$OFF" = "[X]" ] && [ "$LBL" = "[X] | work" ]; then
+  pass "claude mode account segment and overrides"
+else
+  fail "claude mode account segment and overrides (got: $OUT / $ORG / $OFF / $LBL)"
+fi
+
+# Test 2s1g: unknown plan types pass through; providers and API key fallbacks
+printf '%s\n' '{"oauthAccount":{"emailAddress":"a@b.co","organizationType":"claude_team"}}' > "$ACCT/.claude.json"
+TEAM=$(echo "$J" | CLAUDE_CONFIG_DIR="$ACCT" NO_COLOR=1 ./statusline | sed -n '1p')
+printf '%s\n' '{"oauthAccount":{"emailAddress":"a@b.co","organizationType":"claude_future"}}' > "$ACCT/.claude.json"
+FUT=$(echo "$J" | CLAUDE_CONFIG_DIR="$ACCT" NO_COLOR=1 ./statusline | sed -n '1p')
+BR=$(echo "$J" | CLAUDE_CONFIG_DIR="$ACCT" CLAUDE_CODE_USE_BEDROCK=1 NO_COLOR=1 ./statusline | sed -n '1p')
+KEY=$(echo "$J" | ANTHROPIC_API_KEY=x NO_COLOR=1 ./statusline | sed -n '1p')
+rm -rf "$ACCT"
+if [ "$TEAM" = "[X] | a@b.co (Team)" ] && [ "$FUT" = "[X] | a@b.co (future)" ] &&
+  [ "$BR" = "[X] | Bedrock" ] && [ "$KEY" = "[X] | API" ]; then
+  pass "claude mode account plan passthrough and provider fallbacks"
+else
+  fail "claude mode account plan passthrough and provider fallbacks (got: $TEAM / $FUT / $BR / $KEY)"
 fi
 
 # Test 2s2: Claude mode empty string key suppression

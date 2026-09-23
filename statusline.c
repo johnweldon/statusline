@@ -931,8 +931,145 @@ static int json_terminal_width(const char *buf, jsmntok_t *t, int n) {
   return term_columns();
 }
 
+// ==================== account identity ====================
+// The statusline payload carries no account identity, so read the signed-in
+// account from Claude Code's state file: $CLAUDE_CONFIG_DIR/.claude.json, else
+// ~/.claude.json. The file is large and undocumented, so only the
+// "oauthAccount" object is located and parsed; any failure renders nothing.
+
+#define ACCOUNT_FILE_MAX (32 * 1024 * 1024)
+
+// Read the whole file into a NUL-terminated heap buffer; NULL on failure.
+static char *read_small_file(const char *path, size_t *len) {
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    return NULL;
+  struct stat st;
+  char *buf = NULL;
+  if (fstat(fd, &st) == 0 && st.st_size > 0 && st.st_size <= ACCOUNT_FILE_MAX &&
+      (buf = malloc((size_t)st.st_size + 1)) != NULL) {
+    size_t got = 0;
+    ssize_t r;
+    while (got < (size_t)st.st_size &&
+           (r = read(fd, buf + got, (size_t)st.st_size - got)) > 0)
+      got += (size_t)r;
+    buf[got] = '\0';
+    *len = got;
+  }
+  close(fd);
+  return buf;
+}
+
+// Return the end (one past the closing brace) of the JSON object starting at
+// `p` (which must point at '{'), or NULL if it is unterminated.
+static const char *json_object_end(const char *p, const char *end) {
+  int depth = 0, in_str = 0;
+  for (; p < end; p++) {
+    if (in_str) {
+      if (*p == '\\')
+        p++;
+      else if (*p == '"')
+        in_str = 0;
+    } else if (*p == '"') {
+      in_str = 1;
+    } else if (*p == '{') {
+      depth++;
+    } else if (*p == '}' && --depth == 0) {
+      return p + 1;
+    }
+  }
+  return NULL;
+}
+
+// Short plan label from organizationType, e.g. "Team" or "Max 20x". Unknown
+// types render as-is minus a "claude_" prefix rather than being guessed at.
+static void account_plan(const char *type, const char *tier, char *out,
+                         size_t sz) {
+  static const struct {
+    const char *type, *label;
+  } plans[] = {{"claude_max", "Max"},
+               {"claude_pro", "Pro"},
+               {"claude_team", "Team"},
+               {"claude_enterprise", "Enterprise"}};
+  const char *label = NULL;
+  for (size_t i = 0; i < sizeof(plans) / sizeof(plans[0]); i++)
+    if (strcmp(type, plans[i].type) == 0)
+      label = plans[i].label;
+  if (!label)
+    label = strncmp(type, "claude_", 7) == 0 ? type + 7 : type;
+  const char *mult = strstr(tier, "_20x")  ? " 20x"
+                     : strstr(tier, "_5x") ? " 5x"
+                                           : "";
+  snprintf(out, sz, "%s%s", label, mult);
+}
+
+// Fill `out` with the account label: STATUSLINE_ACCOUNT_LABEL verbatim, else
+// the Bedrock/Vertex provider, else "email (Plan)" from oauthAccount ("Plan"
+// alone with STATUSLINE_ACCOUNT=org), else "API" when ANTHROPIC_API_KEY is
+// set. Empty when STATUSLINE_ACCOUNT=off or nothing is known.
+static void account_label(char *out, size_t sz) {
+  out[0] = '\0';
+  const char *mode = getenv("STATUSLINE_ACCOUNT");
+  if (mode && strcmp(mode, "off") == 0)
+    return;
+  const char *fixed = getenv("STATUSLINE_ACCOUNT_LABEL");
+  if (fixed && fixed[0]) {
+    snprintf(out, sz, "%s", fixed);
+    return;
+  }
+  const char *bedrock = getenv("CLAUDE_CODE_USE_BEDROCK");
+  const char *vertex = getenv("CLAUDE_CODE_USE_VERTEX");
+  if (bedrock && bedrock[0] && strcmp(bedrock, "0") != 0) {
+    snprintf(out, sz, "Bedrock");
+    return;
+  }
+  if (vertex && vertex[0] && strcmp(vertex, "0") != 0) {
+    snprintf(out, sz, "Vertex");
+    return;
+  }
+
+  char path[PATH_MAX_LEN] = "";
+  const char *dir = getenv("CLAUDE_CONFIG_DIR");
+  const char *home = getenv("HOME");
+  if (dir && dir[0])
+    snprintf(path, sizeof(path), "%s/.claude.json", dir);
+  else if (home && home[0])
+    snprintf(path, sizeof(path), "%s/.claude.json", home);
+
+  size_t len = 0;
+  char *file = path[0] ? read_small_file(path, &len) : NULL;
+  if (file) {
+    const char *key = memmem(file, len, "\"oauthAccount\"", 14);
+    const char *obj = key ? strchr(key + 14, '{') : NULL;
+    const char *oend = obj ? json_object_end(obj, file + len) : NULL;
+    if (oend) {
+      jsmn_parser p;
+      jsmntok_t t[128];
+      jsmn_init(&p);
+      int n = jsmn_parse(&p, obj, (size_t)(oend - obj), t, 128);
+      char email[128] = "", type[64] = "", tier[64] = "", plan[80] = "";
+      if (n > 0) {
+        jp_str(obj, t, n, "emailAddress", email, sizeof(email));
+        jp_str(obj, t, n, "organizationType", type, sizeof(type));
+        jp_str(obj, t, n, "organizationRateLimitTier", tier, sizeof(tier));
+      }
+      if (type[0])
+        account_plan(type, tier, plan, sizeof(plan));
+      if (mode && strcmp(mode, "org") == 0)
+        snprintf(out, sz, "%s", plan);
+      else if (email[0] && plan[0])
+        snprintf(out, sz, "%s (%s)", email, plan);
+      else
+        snprintf(out, sz, "%s", email[0] ? email : plan);
+    }
+    free(file);
+  }
+  if (!out[0] && getenv("ANTHROPIC_API_KEY"))
+    snprintf(out, sz, "API");
+}
+
 // Line 1: [Model] [·effort ✻] [↯] 📁 folder | 🌿 branch [wt:name] | [vim] [PR]
-// [agent] [name]
+// [agent] [name] [style] [account]
 static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
   seg_t segs[16];
   memset(segs, 0, sizeof(segs));
@@ -1098,6 +1235,17 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
     if (PUSH_SEG(5, SEP_PIPE)) {
       seg_color(s, DIM);
       seg_addf(s, "%s", style);
+      seg_color(s, RST);
+    }
+  }
+
+  // Signed-in account and plan (first to drop when narrow).
+  char account[256];
+  account_label(account, sizeof(account));
+  if (account[0]) {
+    if (PUSH_SEG(6, SEP_PIPE)) {
+      seg_color(s, DIM);
+      seg_addf(s, "%s", account);
       seg_color(s, RST);
     }
   }

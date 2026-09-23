@@ -106,11 +106,13 @@ The working directory is shown relative to `$HOME` as `~`. When it has four or m
 **Claude mode** (two lines):
 
 ```
-[Model] ·high ✻ ↯ 📁 folder | 🌿 branch wt:name | NORMAL | #1234 ✓ | 🤖 agent | name
+[Model] ·high ✻ ↯ 📁 folder | 🌿 branch wt:name | NORMAL | #1234 ✓ | 🤖 agent | name | you@example.com (Max 20x)
 ████████⣿⣿⣿⣿ 67% 100k/200k | $1.43 | +122/-3 | 5h:17%(2h12m) 7d:72%(3h5m) | ⏱ 6m7s/13m3s ↻95% 42m ✗1:tools_changed
 ```
 
-Line 1 shows the model (with reasoning `effort.level`, a `✻` when extended thinking is on, and a `↯` in fast mode), the working-directory basename (clickable to the GitHub repo when the terminal supports OSC 8), the git branch, the worktree name (`worktree.name`, else `workspace.git_worktree`), vim mode, an open-PR badge (`✓`/`✗`/`…`/`draft`, linked to the PR), the active agent name, the custom session name, and a non-default output style. Each is shown only when present in the JSON.
+Line 1 shows the model (with reasoning `effort.level`, a `✻` when extended thinking is on, and a `↯` in fast mode), the working-directory basename (clickable to the GitHub repo when the terminal supports OSC 8), the git branch, the worktree name (`worktree.name`, else `workspace.git_worktree`), vim mode, an open-PR badge (`✓`/`✗`/`…`/`draft`, linked to the PR), the active agent name, the custom session name, a non-default output style, and the signed-in account. Each is shown only when present.
+
+The account is not in the statusline JSON, so it is read from the `oauthAccount` object in Claude Code's state file (`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`) and rendered as `email (Plan)`, with the plan from `organizationType` (`Max`, `Pro`, `Team`, `Enterprise`; unknown types pass through without the `claude_` prefix) and a `5x`/`20x` suffix from the rate-limit tier. That file is internal to Claude Code, so if its shape changes the segment disappears rather than breaking the line. `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` render `Bedrock` or `Vertex` instead, and `ANTHROPIC_API_KEY` renders `API` when there is no OAuth account. The segment is the first dropped on a narrow terminal.
 
 Line 2 is read from Claude Code's statusline JSON: context window usage and absolute tokens, total cost USD, lines added/removed, 5-hour and 7-day rate-limit usage (the 5-hour always shows a reset countdown, the 7-day only at 70% or above), total/API duration, and the prompt cache: the session-wide `prompt_cache.hit_ratio` (falling back to the last call's `cache_read_input_tokens / (input_tokens + cache_creation_input_tokens + cache_read_input_tokens)`), then the time until the cached prefix expires, or `cold(Nk)` with the tokens the next request re-caches, and `✗N:cause` once cache misses occur.
 
@@ -143,7 +145,7 @@ A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task
 - In-progress merge/rebase/cherry-pick/revert/bisect detected via `.git/*_HEAD` files (no spawn)
 - Stash indicator from `.git/refs/stash`
 - K8s context/namespace from `$KUBECONFIG` or `~/.kube/config`
-- Claude Code: model, effort/thinking, folder (repo link), branch, worktree, fast mode, vim mode, PR badge, agent, session name, output style, context bar, cost, lines, 5h/7d rate limits with reset countdowns, duration, prompt cache hit rate, expiry and misses
+- Claude Code: model, effort/thinking, folder (repo link), branch, worktree, fast mode, vim mode, PR badge, agent, session name, output style, signed-in account and plan, context bar, cost, lines, 5h/7d rate limits with reset countdowns, duration, prompt cache hit rate, expiry and misses
 - Width-aware truncation driven by `COLUMNS` (Claude/subagent modes) or `terminal_width` (Antigravity mode)
 - OSC 8 clickable links (repo, PR) when the terminal supports them
 - Subagent status line (`--subagent`): per-task JSON-lines row overrides
@@ -154,17 +156,19 @@ A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task
 
 ## Environment Variables
 
-| Variable            | Description                                                  |
-| ------------------- | ------------------------------------------------------------ |
-| `NO_COLOR`          | Disable colored output (any value)                           |
-| `STATUSLINE_MODE`   | Default mode: `bash`, `claude`, `antigravity`, or `subagent` |
-| `COLUMNS`           | Terminal width; drives width-aware truncation                |
-| `CLAUDE_CONFIG_DIR` | `make install-claude` target (default `~/.claude`)           |
-| `FORCE_HYPERLINK`   | Force OSC 8 links even if the terminal is unknown            |
-| `TERM_PROGRAM`      | Used to detect OSC 8 hyperlink support                       |
-| `KUBECONFIG`        | Kubernetes config file path                                  |
-| `VIRTUAL_ENV`       | Python virtualenv path (bash mode)                           |
-| `SSH_TTY`           | Detected for SSH indicator (bash mode)                       |
+| Variable                   | Description                                                                            |
+| -------------------------- | -------------------------------------------------------------------------------------- |
+| `NO_COLOR`                 | Disable colored output (any value)                                                     |
+| `STATUSLINE_MODE`          | Default mode: `bash`, `claude`, `antigravity`, or `subagent`                           |
+| `COLUMNS`                  | Terminal width; drives width-aware truncation                                          |
+| `CLAUDE_CONFIG_DIR`        | `make install-claude` target and account lookup (default `~/.claude`)                  |
+| `STATUSLINE_ACCOUNT`       | `off` hides the account segment; `org` shows the plan without the email                |
+| `STATUSLINE_ACCOUNT_LABEL` | Fixed account label overriding the lookup (set it in a config's `settings.json` `env`) |
+| `FORCE_HYPERLINK`          | Force OSC 8 links even if the terminal is unknown                                      |
+| `TERM_PROGRAM`             | Used to detect OSC 8 hyperlink support                                                 |
+| `KUBECONFIG`               | Kubernetes config file path                                                            |
+| `VIRTUAL_ENV`              | Python virtualenv path (bash mode)                                                     |
+| `SSH_TTY`                  | Detected for SSH indicator (bash mode)                                                 |
 
 ## Platform Support
 
