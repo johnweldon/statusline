@@ -939,8 +939,9 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
   int c = 0;
   seg_t *s;
 
-#define PUSH_SEG(prio_val, sep_val) \
-  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
+#define PUSH_SEG(prio_val, sep_val)                                            \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s)      \
+          : NULL)
 
   // Model (always present; prio 0, no leading separator).
   char model[256];
@@ -954,7 +955,8 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
 
   // Effort + extended-thinking, adjacent to the model name.
   char effort[32];
-  int has_effort = jp_str(buf, t, n, "effort.level", effort, sizeof(effort)) && effort[0] != '\0';
+  int has_effort = jp_str(buf, t, n, "effort.level", effort, sizeof(effort)) &&
+                   effort[0] != '\0';
   int thinking = jp_bool(buf, t, n, "thinking.enabled", 0);
   if (has_effort || thinking) {
     if (PUSH_SEG(2, SEP_SPACE)) {
@@ -1068,7 +1070,8 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
 
   // Named agent.
   char agent[128];
-  if (jp_str(buf, t, n, "agent.name", agent, sizeof(agent)) && agent[0] != '\0') {
+  if (jp_str(buf, t, n, "agent.name", agent, sizeof(agent)) &&
+      agent[0] != '\0') {
     if (PUSH_SEG(3, SEP_PIPE)) {
       seg_color(s, CYN_F);
       seg_addglyph(s, "\xF0\x9F\xA4\x96", 2); // U+1F916 ROBOT FACE
@@ -1079,7 +1082,8 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
 
   // Custom session name.
   char sess[128];
-  if (jp_str(buf, t, n, "session_name", sess, sizeof(sess)) && sess[0] != '\0') {
+  if (jp_str(buf, t, n, "session_name", sess, sizeof(sess)) &&
+      sess[0] != '\0') {
     if (PUSH_SEG(4, SEP_PIPE)) {
       seg_color(s, DIM);
       seg_addf(s, "%s", sess);
@@ -1163,8 +1167,9 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   int c = 0;
   seg_t *s;
 
-#define PUSH_SEG(prio_val, sep_val) \
-  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
+#define PUSH_SEG(prio_val, sep_val)                                            \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s)      \
+          : NULL)
 
   // Read token data once: used downstream for the bar, absolute counts,
   // the token-based fallback %, and the cache hit rate.
@@ -1264,9 +1269,10 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
         seg_color(s, RST);
         // Weekly reset only matters once the window is getting tight.
         char cd[16];
-        long r7s = rate7 >= RATE7_RESET_PCT
-                       ? secs_until(buf, t, n, "rate_limits.seven_day.resets_at")
-                       : 0;
+        long r7s =
+            rate7 >= RATE7_RESET_PCT
+                ? secs_until(buf, t, n, "rate_limits.seven_day.resets_at")
+                : 0;
         fmt_countdown(cd, sizeof(cd), r7s);
         if (cd[0]) {
           seg_color(s, DIM);
@@ -1362,8 +1368,9 @@ static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n,
   int c = 0;
   seg_t *s;
 
-#define PUSH_SEG(prio_val, sep_val) \
-  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
+#define PUSH_SEG(prio_val, sep_val)                                            \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s)      \
+          : NULL)
 
   // Model (always present; prio 0, no leading separator)
   char model[256];
@@ -1377,12 +1384,14 @@ static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n,
 
   // Agent State
   char state[64];
-  if (jp_str(buf, t, n, "agent_state", state, sizeof(state)) && state[0] != '\0') {
+  if (jp_str(buf, t, n, "agent_state", state, sizeof(state)) &&
+      state[0] != '\0') {
     if (PUSH_SEG(1, SEP_SPACE)) {
       const char *col = WHT_F;
       if (strcmp(state, "idle") == 0) {
         col = DIM;
-      } else if (strcmp(state, "thinking") == 0 || strcmp(state, "working") == 0) {
+      } else if (strcmp(state, "thinking") == 0 ||
+                 strcmp(state, "working") == 0) {
         col = CYN_F;
       }
       seg_color(s, col);
@@ -1455,13 +1464,15 @@ static void pr_antigravity_line1(const char *buf, jsmntok_t *t, int n,
 
   // Conversation ID
   char conv_id[128];
-  if (jp_str(buf, t, n, "conversation_id", conv_id, sizeof(conv_id)) && conv_id[0] != '\0') {
+  if (jp_str(buf, t, n, "conversation_id", conv_id, sizeof(conv_id)) &&
+      conv_id[0] != '\0') {
     if (PUSH_SEG(4, SEP_PIPE)) {
       seg_color(s, DIM);
       seg_addf(s, "#%.8s", conv_id);
       seg_color(s, RST);
     }
-  } else if (jp_str(buf, t, n, "session_id", conv_id, sizeof(conv_id)) && conv_id[0] != '\0') {
+  } else if (jp_str(buf, t, n, "session_id", conv_id, sizeof(conv_id)) &&
+             conv_id[0] != '\0') {
     if (PUSH_SEG(4, SEP_PIPE)) {
       seg_color(s, DIM);
       seg_addf(s, "#%.8s", conv_id);
@@ -1491,21 +1502,26 @@ static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n,
   int c = 0;
   seg_t *s;
 
-#define PUSH_SEG(prio_val, sep_val) \
-  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
+#define PUSH_SEG(prio_val, sep_val)                                            \
+  (c < 16 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s)      \
+          : NULL)
 
   // Context window size & usage
   long size = jp_long(buf, t, n, "context_window.context_window_size", 0);
-  long in_tok = clamp_tok(
-      jp_long(buf, t, n, "context_window.total_input_tokens", 0));
-  long out_tok = clamp_tok(
-      jp_long(buf, t, n, "context_window.total_output_tokens", 0));
+  long in_tok =
+      clamp_tok(jp_long(buf, t, n, "context_window.total_input_tokens", 0));
+  long out_tok =
+      clamp_tok(jp_long(buf, t, n, "context_window.total_output_tokens", 0));
 
   // Fallback to current_usage input tokens if total_input_tokens is 0
   if (in_tok == 0) {
-    long in_curr = clamp_tok(jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0));
-    long ccr_curr = clamp_tok(jp_long(buf, t, n, "context_window.current_usage.cache_creation_input_tokens", 0));
-    long cr_curr = clamp_tok(jp_long(buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
+    long in_curr = clamp_tok(
+        jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0));
+    long ccr_curr = clamp_tok(
+        jp_long(buf, t, n,
+                "context_window.current_usage.cache_creation_input_tokens", 0));
+    long cr_curr = clamp_tok(jp_long(
+        buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
     in_tok = in_curr + ccr_curr + cr_curr;
   }
 
@@ -1550,13 +1566,15 @@ static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n,
     }
   }
 
-  // Cache hit rate (including cache creation tokens for mathematical correctness)
+  // Cache hit rate (including cache creation tokens for mathematical
+  // correctness)
   long in_curr = clamp_tok(
       jp_long(buf, t, n, "context_window.current_usage.input_tokens", 0));
   long ccr_curr = clamp_tok(
-      jp_long(buf, t, n, "context_window.current_usage.cache_creation_input_tokens", 0));
-  long cr_curr = clamp_tok(
-      jp_long(buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
+      jp_long(buf, t, n,
+              "context_window.current_usage.cache_creation_input_tokens", 0));
+  long cr_curr = clamp_tok(jp_long(
+      buf, t, n, "context_window.current_usage.cache_read_input_tokens", 0));
   long denom = in_curr + ccr_curr + cr_curr;
   if (denom > 0) {
     long cache_pct = (long)((long long)cr_curr * 100 / denom);
@@ -1583,7 +1601,8 @@ static void pr_antigravity_line2(const char *buf, jsmntok_t *t, int n,
 
   // Version
   char version[64];
-  if (jp_str(buf, t, n, "version", version, sizeof(version)) && version[0] != '\0') {
+  if (jp_str(buf, t, n, "version", version, sizeof(version)) &&
+      version[0] != '\0') {
     if (PUSH_SEG(3, SEP_PIPE)) {
       seg_color(s, DIM);
       seg_addf(s, "v%s", version);
@@ -1621,8 +1640,8 @@ static void pr_antigravity(void) {
   jsmn_parser p;
   static jsmntok_t toks[MAX_TOKENS_ANTIGRAVITY];
   jsmn_init(&p);
-  int n = jsmn_parse(&p, g_input, strlen(g_input), toks,
-                     MAX_TOKENS_ANTIGRAVITY);
+  int n =
+      jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS_ANTIGRAVITY);
   if (n < 1) {
     color(WHT_F);
     printf("[Unknown]");
@@ -1636,8 +1655,8 @@ static int pr_antigravity_if_detected(void) {
   jsmn_parser p;
   static jsmntok_t toks[MAX_TOKENS_ANTIGRAVITY];
   jsmn_init(&p);
-  int n = jsmn_parse(&p, g_input, strlen(g_input), toks,
-                     MAX_TOKENS_ANTIGRAVITY);
+  int n =
+      jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS_ANTIGRAVITY);
   if (n < 1)
     return 0;
   char prod[64] = "";
@@ -1735,7 +1754,7 @@ static void pr_subagent_row(const char *buf, jsmntok_t *t, int n, int el,
   int c = 0;
   seg_t *s;
 
-#define PUSH_SEG(prio_val, sep_val) \
+#define PUSH_SEG(prio_val, sep_val)                                            \
   (c < 8 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
 
   const char *col = DIM, *gl = "\xC2\xB7"; // U+00B7 pending/unknown

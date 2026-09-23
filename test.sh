@@ -45,6 +45,7 @@ fi
 
 # Test 2b: Claude mode renders cost, lines, durations from nested cost block
 OUT=$(echo '{"model":{"display_name":"X"},"cost":{"total_cost_usd":1.426,"total_lines_added":122,"total_lines_removed":3,"total_duration_ms":783478,"total_api_duration_ms":367185}}' | ./statusline 2>&1)
+# shellcheck disable=SC2016 # literal $ in the expected output
 if echo "$OUT" | grep -q '\$1\.43' &&
   echo "$OUT" | grep -q '+122' &&
   echo "$OUT" | grep -q -- '-3' &&
@@ -149,6 +150,7 @@ J='{"model":{"display_name":"X"},"workspace":{"current_dir":"/no/such/proj"},"co
 OUT=$(echo "$J" | NO_COLOR=1 ./statusline --claude)
 L1=$(echo "$OUT" | sed -n '1p')
 L2=$(echo "$OUT" | sed -n '2p')
+# shellcheck disable=SC2016 # literal $ in the expected output
 EXP2='████████⣿⣿⣿⣿ 67% | $1.43 | +122/-3 | 5h:4% | ⏱ 6m7s/13m3s'
 if [ "$L1" = "[X] 📁 proj" ] && [ "$L2" = "$EXP2" ]; then
   pass "claude exact backward-compatible output"
@@ -266,7 +268,7 @@ fi
 
 # Test 2o4: json_escape produces valid JSON for quotes/backslashes/tabs in name
 if command -v jq > /dev/null 2>&1; then
-  OUT=$(echo '{"tasks":[{"id":"t1","name":"a\"b\\c\tnext"}]}' | NO_COLOR=1 ./statusline --subagent)
+  OUT=$(printf '%s\n' '{"tasks":[{"id":"t1","name":"a\"b\\c\tnext"}]}' | NO_COLOR=1 ./statusline --subagent)
   if echo "$OUT" | jq -e . > /dev/null 2>&1; then
     pass "subagent json_escape yields valid JSON for special chars"
   else
@@ -323,8 +325,8 @@ fi
 # Test 2r2b: Antigravity mode auto-detection accepts official CLI product value
 OUT=$(echo '{"model":{"display_name":"Gemini 3.5 Flash"},"product":"antigravity-cli","agent_state":"working","plan_tier":"Pro"}' | NO_COLOR=1 ./statusline 2>&1)
 if echo "$OUT" | grep -q '\[3.5 Flash\]' &&
-   echo "$OUT" | grep -q 'working' &&
-   echo "$OUT" | grep -q 'Pro'; then
+  echo "$OUT" | grep -q 'working' &&
+  echo "$OUT" | grep -q 'Pro'; then
   pass "antigravity mode auto-detected by cli product field"
 else
   fail "antigravity mode auto-detected by cli product field (got: $OUT)"
@@ -335,12 +337,12 @@ J_AG='{"model":{"display_name":"Gemini 3.5 Flash (Medium)"},"product":"antigravi
 OUT=$(echo "$J_AG" | NO_COLOR=1 ./statusline --antigravity)
 L1=$(echo "$OUT" | sed -n '1p')
 if echo "$L1" | grep -q '\[3.5 Flash (Medium)\]' &&
-   echo "$L1" | grep -q 'working' &&
-   echo "$L1" | grep -q 'sandbox' &&
-   echo "$L1" | grep -q 'proj' &&
-   echo "$L1" | grep -q 'Google AI Pro' &&
-   echo "$L1" | grep -q '#8dedc981' &&
-   echo "$L1" | grep -q 'johnweldon4@gmail.com'; then
+  echo "$L1" | grep -q 'working' &&
+  echo "$L1" | grep -q 'sandbox' &&
+  echo "$L1" | grep -q 'proj' &&
+  echo "$L1" | grep -q 'Google AI Pro' &&
+  echo "$L1" | grep -q '#8dedc981' &&
+  echo "$L1" | grep -q 'johnweldon4@gmail.com'; then
   pass "antigravity mode renders all line 1 segments"
 else
   fail "antigravity mode renders all line 1 segments (got: $L1)"
@@ -351,11 +353,11 @@ J_AG2='{"model":{"display_name":"X"},"product":"antigravity","version":"1.0.5","
 OUT=$(echo "$J_AG2" | NO_COLOR=1 ./statusline --antigravity)
 L2=$(echo "$OUT" | sed -n '2p')
 if echo "$L2" | grep -q '5%' &&
-   echo "$L2" | grep -q '58k/1.0M' &&
-   echo "$L2" | grep -q '17k out' &&
-   echo "$L2" | grep -q '99%' &&
-   echo "$L2" | grep -q '>200k' &&
-   echo "$L2" | grep -q 'v1.0.5'; then
+  echo "$L2" | grep -q '58k/1.0M' &&
+  echo "$L2" | grep -q '17k out' &&
+  echo "$L2" | grep -q '99%' &&
+  echo "$L2" | grep -q '>200k' &&
+  echo "$L2" | grep -q 'v1.0.5'; then
   pass "antigravity mode renders all line 2 segments"
 else
   fail "antigravity mode renders all line 2 segments (got: $L2)"
@@ -402,9 +404,9 @@ J_AG_WIDTH='{"model":{"display_name":"Gemini"},"product":"antigravity","agent_st
 OUT=$(echo "$J_AG_WIDTH" | NO_COLOR=1 COLUMNS=1000 ./statusline --antigravity)
 L1=$(echo "$OUT" | sed -n '1p')
 if echo "$L1" | grep -q '\[Gemini\]' &&
-   echo "$L1" | grep -q 'proj' &&
-   ! echo "$L1" | grep -q 'working' &&
-   ! echo "$L1" | grep -q 'developer@example.com'; then
+  echo "$L1" | grep -q 'proj' &&
+  ! echo "$L1" | grep -q 'working' &&
+  ! echo "$L1" | grep -q 'developer@example.com'; then
   pass "antigravity mode uses terminal_width for truncation"
 else
   fail "antigravity mode uses terminal_width for truncation (got: $L1)"
@@ -419,8 +421,8 @@ done
 BIG_AG="$BIG_AG]}"
 OUT=$(printf '%s' "$BIG_AG" | NO_COLOR=1 ./statusline)
 if echo "$OUT" | grep -q 'working' &&
-   echo "$OUT" | grep -q '1%' &&
-   ! echo "$OUT" | grep -q 'Unknown'; then
+  echo "$OUT" | grep -q '1%' &&
+  ! echo "$OUT" | grep -q 'Unknown'; then
   pass "antigravity mode handles large payload arrays"
 else
   fail "antigravity mode handles large payload arrays (got: $OUT)"
@@ -490,7 +492,6 @@ else
   pass "claude mode suppresses empty string values"
 fi
 
-
 # Test 3: Bash mode output
 OUT=$(./statusline --bash 2>&1)
 if echo "$OUT" | grep -q '\$'; then
@@ -516,8 +517,7 @@ else
 fi
 
 # Test 6: Invalid numeric args don't crash
-OUT=$(./statusline --bash --exit-code=abc --jobs=xyz 2>&1)
-if [ $? -eq 0 ]; then
+if OUT=$(./statusline --bash --exit-code=abc --jobs=xyz 2>&1); then
   pass "invalid args handled gracefully"
 else
   fail "invalid args handled gracefully"
@@ -556,7 +556,7 @@ cleanup_repo() {
 
 # Test 8: Clean repo has no dirty indicator
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
 if echo "$OUT" | grep -q '\*'; then
   fail "clean repo shows no dirty indicator"
@@ -567,7 +567,7 @@ cleanup_repo "$TMPD"
 
 # Test 9: Modified tracked file detected as dirty
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 echo "modified" > file.txt
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
 if echo "$OUT" | grep -q '\*'; then
@@ -579,7 +579,7 @@ cleanup_repo "$TMPD"
 
 # Test 10: Deleted tracked file detected as dirty
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 rm file.txt
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
 if echo "$OUT" | grep -q '\*'; then
@@ -591,7 +591,7 @@ cleanup_repo "$TMPD"
 
 # Test 11: Mode change detected as dirty
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 chmod +x file.txt
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
 if echo "$OUT" | grep -q '\*'; then
@@ -603,7 +603,7 @@ cleanup_repo "$TMPD"
 
 # Test 12: Staged-only change detected as dirty
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 echo "staged" > file.txt
 git add file.txt
 sleep 1
@@ -618,7 +618,7 @@ cleanup_repo "$TMPD"
 
 # Test 13: Stash indicator displayed
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 echo "stash me" > file.txt
 git stash -q
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
@@ -631,7 +631,7 @@ cleanup_repo "$TMPD"
 
 # Test 14: Detached HEAD shows short SHA
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 SHA=$(git rev-parse HEAD)
 git checkout -q "$SHA"
 OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
@@ -645,13 +645,13 @@ cleanup_repo "$TMPD"
 
 # Test 15: Worktree dirty detection
 TMPD=$(setup_repo)
-cd "$TMPD"
+cd "$TMPD" || exit 1
 git worktree add -q ../wt-test -b wt-branch 2> /dev/null
 if [ -d "../wt-test" ]; then
-  cd "../wt-test"
+  cd "../wt-test" || exit 1
   echo "dirty" > file.txt
   OUT=$(NO_COLOR=1 "$SL" --bash 2>&1)
-  cd "$ORIG_DIR"
+  cd "$ORIG_DIR" || exit 1
   if echo "$OUT" | grep -q '\*'; then
     pass "worktree dirty detection"
   else
@@ -684,6 +684,7 @@ TMPD=$(mktemp -d)
 TMPD=$(cd "$TMPD" && pwd -P)
 mkdir -p "$TMPD/build/src/github.com/johnweldon/statusline"
 TOK=$(run_cwd "$TMPD/build/src/github.com/johnweldon/statusline" "$TMPD")
+# shellcheck disable=SC2088 # literal ~ is the expected output
 if [ "$TOK" = "~/b/s/g/j/statusline" ]; then
   pass "bash cwd deep HOME path truncates to initials"
 else
@@ -708,6 +709,7 @@ TMPD=$(mktemp -d)
 TMPD=$(cd "$TMPD" && pwd -P)
 mkdir -p "$TMPD/a/b/c/d"
 TOK=$(run_cwd "$TMPD/a/b/c/d" "$TMPD")
+# shellcheck disable=SC2088 # literal ~ is the expected output
 if [ "$TOK" = "~/a/b/c/d" ]; then
   pass "bash cwd at-threshold path unchanged"
 else
@@ -720,6 +722,7 @@ TMPD=$(mktemp -d)
 TMPD=$(cd "$TMPD" && pwd -P)
 mkdir -p "$TMPD/.config/nvim/lua/plugins/foo"
 TOK=$(run_cwd "$TMPD/.config/nvim/lua/plugins/foo" "$TMPD")
+# shellcheck disable=SC2088 # literal ~ is the expected output
 if [ "$TOK" = "~/.c/n/l/p/foo" ]; then
   pass "bash cwd hidden dir keeps dot plus letter"
 else
@@ -743,6 +746,7 @@ TMPD=$(mktemp -d)
 TMPD=$(cd "$TMPD" && pwd -P)
 if mkdir -p "$TMPD/éfoo/bar/baz/qux/leaf" 2> /dev/null && [ -d "$TMPD/éfoo/bar/baz/qux/leaf" ]; then
   TOK=$(run_cwd "$TMPD/éfoo/bar/baz/qux/leaf" "$TMPD")
+  # shellcheck disable=SC2088 # literal ~ is the expected output
   if [ "$TOK" = "~/é/b/b/q/leaf" ]; then
     pass "bash cwd multibyte interior keeps whole codepoint"
   else
@@ -770,6 +774,7 @@ TMPD=$(mktemp -d)
 TMPD=$(cd "$TMPD" && pwd -P)
 mkdir -p "$TMPD/..config/aa/bb/cc/dd/ee"
 TOK=$(run_cwd "$TMPD/..config/aa/bb/cc/dd/ee" "$TMPD")
+# shellcheck disable=SC2088 # literal ~ is the expected output
 if [ "$TOK" = "~/./a/b/c/d/ee" ]; then
   pass "bash cwd dotdot-name interior never renders as .."
 else
