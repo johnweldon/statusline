@@ -434,6 +434,53 @@ else
   fail "claude mode cache hit rate includes cache creation tokens (got: $OUT, expected to find 82%)"
 fi
 
+# Test 2s1a: prompt_cache.hit_ratio (session-wide) wins over the last-call derivation
+EXP=$(($(date +%s) + 1790))
+J="{\"model\":{\"display_name\":\"X\"},\"context_window\":{\"context_window_size\":200000,\"current_usage\":{\"input_tokens\":15000,\"cache_creation_input_tokens\":2000,\"cache_read_input_tokens\":80000}},\"prompt_cache\":{\"warm\":true,\"caching_observed\":true,\"expires_at\":$EXP,\"hit_ratio\":0.9535,\"misses\":0}}"
+OUT=$(echo "$J" | NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q '↻95% 29m' && ! echo "$OUT" | grep -q '82%'; then
+  pass "claude mode prompt cache hit ratio and expiry countdown"
+else
+  fail "claude mode prompt cache hit ratio and expiry countdown (got: $OUT)"
+fi
+
+# Test 2s1b: cold cache shows recache cost; misses show count and last cause
+J='{"model":{"display_name":"X"},"prompt_cache":{"warm":false,"caching_observed":true,"expires_at":null,"hit_ratio":0.8,"misses":2,"last_miss_cause":{"causes":["tools_changed"],"tools_added":2},"recache_tokens_if_cold":67971}}'
+OUT=$(echo "$J" | NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q '↻80% cold(67k) ✗2:tools_changed'; then
+  pass "claude mode prompt cache cold and misses"
+else
+  fail "claude mode prompt cache cold and misses (got: $OUT)"
+fi
+
+# Test 2s1c: a prompt_cache block with nothing cached yet renders no cache segment
+OUT=$(echo '{"model":{"display_name":"X"},"prompt_cache":{"warm":false,"caching_observed":false,"hit_ratio":null,"misses":0}}' | NO_COLOR=1 ./statusline)
+if ! echo "$OUT" | grep -q '↻'; then
+  pass "claude mode omits cache segment before any caching"
+else
+  fail "claude mode omits cache segment before any caching (got: $OUT)"
+fi
+
+# Test 2s1d: 7-day reset countdown appears only at or above the threshold
+R7=$(($(date +%s) + 2 * 86400 + 300))
+OUT=$(echo "{\"model\":{\"display_name\":\"X\"},\"rate_limits\":{\"seven_day\":{\"used_percentage\":75,\"resets_at\":$R7}}}" | NO_COLOR=1 ./statusline)
+OUT2=$(echo "{\"model\":{\"display_name\":\"X\"},\"rate_limits\":{\"seven_day\":{\"used_percentage\":40,\"resets_at\":$R7}}}" | NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q '7d:75%(48h' && ! echo "$OUT2" | grep -q '7d:40%('; then
+  pass "claude mode 7-day reset countdown gated by usage"
+else
+  fail "claude mode 7-day reset countdown gated by usage (got: $OUT / $OUT2)"
+fi
+
+# Test 2s1e: fast mode glyph and worktree name (worktree.name, then workspace.git_worktree)
+OUT=$(echo '{"model":{"display_name":"X"},"fast_mode":true,"workspace":{"current_dir":"/no/such/proj"},"worktree":{"name":"feat-a"}}' | NO_COLOR=1 ./statusline)
+OUT2=$(echo '{"model":{"display_name":"X"},"fast_mode":false,"workspace":{"current_dir":"/no/such/proj","git_worktree":"feat-b"}}' | NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q '\[X\] ↯' && echo "$OUT" | grep -q 'wt:feat-a' &&
+  ! echo "$OUT2" | grep -q '↯' && echo "$OUT2" | grep -q 'wt:feat-b'; then
+  pass "claude mode fast mode and worktree indicators"
+else
+  fail "claude mode fast mode and worktree indicators (got: $OUT / $OUT2)"
+fi
+
 # Test 2s2: Claude mode empty string key suppression
 J_CL_EMPTY='{"model":{"display_name":"X"},"vim":{"mode":""},"agent":{"name":""},"session_name":""}'
 OUT=$(echo "$J_CL_EMPTY" | NO_COLOR=1 ./statusline)

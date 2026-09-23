@@ -54,6 +54,7 @@ static int g_shlvl = 0;
 #define RED_F "\033[31m"
 #define GRN_F "\033[32m"
 #define YEL_F "\033[33m"
+#define MAG_F "\033[35m"
 #define YEL "\033[0;33m"
 #define BLD_YEL "\033[1;33m"
 #define GRN "\033[1;32m"
@@ -930,7 +931,8 @@ static int json_terminal_width(const char *buf, jsmntok_t *t, int n) {
   return term_columns();
 }
 
-// Line 1: [Model] [·effort ✻] 📁 folder | 🌿 branch | [vim] [PR] [agent] [name]
+// Line 1: [Model] [·effort ✻] [↯] 📁 folder | 🌿 branch [wt:name] | [vim] [PR]
+// [agent] [name]
 static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
   seg_t segs[16];
   memset(segs, 0, sizeof(segs));
@@ -964,6 +966,15 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
           seg_addf(s, " ");
         seg_addglyph(s, "\xE2\x9C\xBB", 1); // U+273B TEARDROP-SPOKED ASTERISK
       }
+      seg_color(s, RST);
+    }
+  }
+
+  // Fast mode.
+  if (jp_bool(buf, t, n, "fast_mode", 0)) {
+    if (PUSH_SEG(2, SEP_SPACE)) {
+      seg_color(s, YEL_F);
+      seg_addglyph(s, "\xE2\x86\xAF", 1); // U+21AF DOWNWARDS ZIGZAG ARROW
       seg_color(s, RST);
     }
   }
@@ -1002,6 +1013,19 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
           seg_color(s, RST);
         }
       }
+    }
+  }
+
+  // Worktree name: Claude Code worktree session, else a linked git worktree.
+  char wtname[128];
+  if ((jp_str(buf, t, n, "worktree.name", wtname, sizeof(wtname)) &&
+       wtname[0]) ||
+      (jp_str(buf, t, n, "workspace.git_worktree", wtname, sizeof(wtname)) &&
+       wtname[0])) {
+    if (PUSH_SEG(1, SEP_SPACE)) {
+      seg_color(s, MAG_F);
+      seg_addf(s, "wt:%s", wtname);
+      seg_color(s, RST);
     }
   }
 
@@ -1078,6 +1102,9 @@ static void pr_claude_line1(const char *buf, jsmntok_t *t, int n) {
 #undef PUSH_SEG
 }
 
+// Show the 7-day reset countdown only at or above this usage percentage.
+#define RATE7_RESET_PCT 70
+
 // "2h12m" / "13m" / "<1m" from a positive second count. Empty if secs <= 0.
 static void fmt_countdown(char *out, size_t sz, long secs) {
   if (secs <= 0) {
@@ -1128,8 +1155,8 @@ static long secs_until(const char *buf, jsmntok_t *t, int n, const char *path) {
 // context window.
 static long clamp_tok(long v) { return (v < 0 || v > 100000000L) ? 0 : v; }
 
-// Line 2: bar N% used/size | $cost | +a/-r | 5h:N%(reset) 7d:M% | ⏱ api/total
-// ↻%
+// Line 2: bar N% used/size | $cost | +a/-r | 5h:N%(reset) 7d:M%[(reset)] |
+// ⏱ api/total ↻%[ expiry | cold(recache)][ ✗misses:cause]
 static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
   seg_t segs[16];
   memset(segs, 0, sizeof(segs));
@@ -1235,6 +1262,17 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
         seg_color(s, rc);
         seg_addf(s, "7d:%ld%%", rate7);
         seg_color(s, RST);
+        // Weekly reset only matters once the window is getting tight.
+        char cd[16];
+        long r7s = rate7 >= RATE7_RESET_PCT
+                       ? secs_until(buf, t, n, "rate_limits.seven_day.resets_at")
+                       : 0;
+        fmt_countdown(cd, sizeof(cd), r7s);
+        if (cd[0]) {
+          seg_color(s, DIM);
+          seg_addf(s, "(%s)", cd);
+          seg_color(s, RST);
+        }
       }
     }
   }
@@ -1257,15 +1295,57 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
     }
   }
 
-  // Cache hit rate: read / (input + cache_creation + read). Reuses tokens read at top.
-  long denom = in_tok + ccr_tok + cr_tok;
-  if (denom > 0) {
-    long cache_pct = (long)((long long)cr_tok * 100 / denom);
-    if (cache_pct > 0) {
-      if (PUSH_SEG(5, SEP_SPACE)) {
-        seg_color(s, DIM);
-        seg_addglyph(s, "\xE2\x86\xBB", 1); // U+21BB CLOCKWISE OPEN ARROW
+  // Prompt cache. Hit rate prefers the session-wide prompt_cache.hit_ratio,
+  // falling back to read / (input + cache_creation + read) from the last call.
+  // Then: time until the cached prefix expires, or "cold" with the tokens the
+  // next request re-caches; and the miss count with the last miss cause.
+  long cache_pct = -1;
+  double ratio = jp_dbl(buf, t, n, "prompt_cache.hit_ratio", -1.0);
+  if (ratio >= 0 && ratio <= 1)
+    cache_pct = (long)(ratio * 100);
+  else if (used_tok > 0)
+    cache_pct = (long)((long long)cr_tok * 100 / used_tok);
+  int observed = jp_bool(buf, t, n, "prompt_cache.caching_observed", 0);
+  int warm = jp_bool(buf, t, n, "prompt_cache.warm", -1);
+  long misses = jp_long(buf, t, n, "prompt_cache.misses", 0);
+  if (cache_pct > 0 || (observed && warm == 0) || misses > 0) {
+    if (PUSH_SEG(4, SEP_SPACE)) {
+      seg_color(s, DIM);
+      seg_addglyph(s, "\xE2\x86\xBB", 1); // U+21BB CLOCKWISE OPEN ARROW
+      if (cache_pct >= 0)
         seg_addf(s, "%ld%%", cache_pct);
+      seg_color(s, RST);
+      if (observed && warm == 0) {
+        seg_color(s, YEL_F);
+        seg_addf(s, " cold");
+        long recache = clamp_tok(
+            jp_long(buf, t, n, "prompt_cache.recache_tokens_if_cold", 0));
+        if (recache > 0) {
+          char rt[16];
+          fmt_tokens(rt, sizeof(rt), recache);
+          seg_addf(s, "(%s)", rt);
+        }
+        seg_color(s, RST);
+      } else if (warm == 1) {
+        char cd[16];
+        fmt_countdown(cd, sizeof(cd),
+                      secs_until(buf, t, n, "prompt_cache.expires_at"));
+        if (cd[0]) {
+          seg_color(s, DIM);
+          seg_addf(s, " %s", cd);
+          seg_color(s, RST);
+        }
+      }
+      if (misses > 0) {
+        seg_color(s, YEL_F);
+        seg_addf(s, " \xE2\x9C\x97%ld", misses); // U+2717 BALLOT X
+        int arr =
+            jp_find_array(buf, t, n, "prompt_cache.last_miss_cause.causes");
+        int el = arr >= 0 ? jp_array_next(t, n, arr, arr + 1) : -1;
+        if (el >= 0 && t[el].type == JSMN_STRING) {
+          int len = t[el].end - t[el].start;
+          seg_addf(s, ":%.*s", len > 32 ? 32 : len, buf + t[el].start);
+        }
         seg_color(s, RST);
       }
     }

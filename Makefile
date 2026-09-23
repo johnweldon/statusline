@@ -1,7 +1,7 @@
 CC      = cc
 CFLAGS  = -O2 -Wall -Wextra -Wformat -Wformat-security -fstack-protector-strong
 PREFIX  = /usr/local/bin
-CLAUDE  = $(HOME)/.claude
+CLAUDE  = $(or $(CLAUDE_CONFIG_DIR),$(HOME)/.claude)
 ANTIGRAVITY = $(HOME)/.gemini/antigravity-cli
 VERSION = $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 
