@@ -1490,16 +1490,19 @@ static void pr_claude_line2(const char *buf, jsmntok_t *t, int n) {
           seg_color(s, RST);
         }
       }
-      if (misses > 0) {
+      // misses and last_miss_cause are session-cumulative and never reset, so
+      // an idle TTL expiry would stick for the rest of the session; skip it
+      // (cold already covers the idle state).
+      int arr = jp_find_array(buf, t, n, "prompt_cache.last_miss_cause.causes");
+      int el = arr >= 0 ? jp_array_next(t, n, arr, arr + 1) : -1;
+      int len =
+          el >= 0 && t[el].type == JSMN_STRING ? t[el].end - t[el].start : -1;
+      int ttl = len >= 11 && strncmp(buf + t[el].start, "ttl_expired", 11) == 0;
+      if (misses > 0 && !ttl) {
         seg_color(s, YEL_F);
         seg_addf(s, " \xE2\x9C\x97%ld", misses); // U+2717 BALLOT X
-        int arr =
-            jp_find_array(buf, t, n, "prompt_cache.last_miss_cause.causes");
-        int el = arr >= 0 ? jp_array_next(t, n, arr, arr + 1) : -1;
-        if (el >= 0 && t[el].type == JSMN_STRING) {
-          int len = t[el].end - t[el].start;
+        if (len >= 0)
           seg_addf(s, ":%.*s", len > 32 ? 32 : len, buf + t[el].start);
-        }
         seg_color(s, RST);
       }
     }

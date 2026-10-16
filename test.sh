@@ -461,6 +461,16 @@ else
   fail "claude mode prompt cache cold and misses (got: $OUT)"
 fi
 
+# Test 2s1b2: an idle TTL expiry as the last miss cause hides the miss badge
+EXP=$(($(date +%s) + 1790))
+J="{\"model\":{\"display_name\":\"X\"},\"prompt_cache\":{\"warm\":true,\"caching_observed\":true,\"expires_at\":$EXP,\"hit_ratio\":0.9,\"misses\":2,\"last_miss_cause\":{\"causes\":[\"ttl_expired_1h\"]}}}"
+OUT=$(echo "$J" | NO_COLOR=1 ./statusline)
+if echo "$OUT" | grep -q '↻90% 29m' && ! echo "$OUT" | grep -q '✗'; then
+  pass "claude mode hides TTL-expiry cache misses"
+else
+  fail "claude mode hides TTL-expiry cache misses (got: $OUT)"
+fi
+
 # Test 2s1c: a prompt_cache block with nothing cached yet renders no cache segment
 OUT=$(echo '{"model":{"display_name":"X"},"prompt_cache":{"warm":false,"caching_observed":false,"hit_ratio":null,"misses":0}}' | NO_COLOR=1 ./statusline)
 if ! echo "$OUT" | grep -q '↻'; then
