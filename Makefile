@@ -21,13 +21,11 @@ statusline: statusline.c ## Build the statusline binary (default)
 install: statusline ## Install binary and symlinks to $(PREFIX)
 	install -m 755 statusline $(PREFIX)/statusline
 	ln -sf statusline $(PREFIX)/bashline
-	ln -sf statusline $(PREFIX)/subagentline
 	ln -sf statusline $(PREFIX)/antigravityline
 
 install-local: statusline ## Install binary and symlinks to $(HOME)/.local/bin
 	install -m 755 statusline $(HOME)/.local/bin/statusline
 	ln -sf statusline $(HOME)/.local/bin/bashline
-	ln -sf statusline $(HOME)/.local/bin/subagentline
 	ln -sf statusline $(HOME)/.local/bin/antigravityline
 
 install-claude: statusline ## Install binary to $(CLAUDE)

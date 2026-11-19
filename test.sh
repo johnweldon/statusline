@@ -232,66 +232,6 @@ else
   fail "FORCE_HYPERLINK emits OSC 8 repo link"
 fi
 
-# Test 2o: subagent mode emits one JSON line per task with an id
-OUT=$(echo '{"columns":80,"tasks":[{"id":"t1","name":"explore","type":"Explore","status":"in_progress","tokenCount":15400},{"id":"t2","name":"review","status":"completed","label":"code-review","tokenCount":2300}]}' | NO_COLOR=1 ./statusline --subagent)
-if [ "$(echo "$OUT" | wc -l | tr -d ' ')" = "2" ] &&
-  echo "$OUT" | grep -q '"id":"t1"' && echo "$OUT" | grep -q '"id":"t2"'; then
-  pass "subagent emits a row per task"
-else
-  fail "subagent emits a row per task (got: $OUT)"
-fi
-
-# Test 2o1: subagent output is valid JSON per line (if jq available)
-if command -v jq > /dev/null 2>&1; then
-  BAD=0
-  while IFS= read -r line; do
-    echo "$line" | jq -e . > /dev/null 2>&1 || BAD=1
-  done <<< "$OUT"
-  if [ "$BAD" -eq 0 ]; then
-    pass "subagent output is valid JSON lines"
-  else
-    fail "subagent output is valid JSON lines"
-  fi
-else
-  pass "subagent JSON validation skipped (jq not available)"
-fi
-
-# Test 2o2: subagent skips tasks without an id
-OUT=$(echo '{"tasks":[{"name":"noid","status":"running"}]}' | ./statusline --subagent)
-if [ -z "$OUT" ]; then
-  pass "subagent skips tasks without id"
-else
-  fail "subagent skips tasks without id (got: $OUT)"
-fi
-
-# Test 2o3: subagent with no tasks key produces no output
-OUT=$(echo '{"columns":80}' | ./statusline --subagent)
-if [ -z "$OUT" ]; then
-  pass "subagent with no tasks produces no output"
-else
-  fail "subagent with no tasks produces no output (got: $OUT)"
-fi
-
-# Test 2o4: json_escape produces valid JSON for quotes/backslashes/tabs in name
-if command -v jq > /dev/null 2>&1; then
-  OUT=$(printf '%s\n' '{"tasks":[{"id":"t1","name":"a\"b\\c\tnext"}]}' | NO_COLOR=1 ./statusline --subagent)
-  if echo "$OUT" | jq -e . > /dev/null 2>&1; then
-    pass "subagent json_escape yields valid JSON for special chars"
-  else
-    fail "subagent json_escape yields valid JSON for special chars (got: $OUT)"
-  fi
-else
-  pass "subagent json_escape test skipped (jq not available)"
-fi
-
-# Test 2o5: subagent dispatch via STATUSLINE_MODE env var
-OUT=$(echo '{"tasks":[{"id":"z","name":"n","status":"completed"}]}' | STATUSLINE_MODE=subagent NO_COLOR=1 ./statusline)
-if echo "$OUT" | grep -q '"id":"z"'; then
-  pass "subagent dispatch via STATUSLINE_MODE"
-else
-  fail "subagent dispatch via STATUSLINE_MODE (got: $OUT)"
-fi
-
 # Test 2p: resets_at in milliseconds is normalized to a sane countdown
 OUT=$(echo '{"model":{"display_name":"X"},"rate_limits":{"five_hour":{"used_percentage":17,"resets_at":9999999999000}}}' | NO_COLOR=1 ./statusline --claude)
 if echo "$OUT" | grep -q '5h:17%('; then

@@ -31,7 +31,6 @@ echo '{"model":{"display_name":"Opus 4.7"}}' | statusline
 --bash         Bash prompt mode
 --claude       Claude Code mode (default)
 --antigravity  Antigravity (Gemini) mode
---subagent     Subagent status line (JSON-lines output)
 --ps1          PS1-compatible escape sequences
 --exit-code=N  Last command exit code
 --jobs=N       Background jobs count
@@ -63,15 +62,11 @@ Install with `make install-local` (`~/.local/bin/statusline`, shared by every Cl
     "type": "command",
     "command": "~/.local/bin/statusline",
     "refreshInterval": 30
-  },
-  "subagentStatusLine": {
-    "type": "command",
-    "command": "~/.local/bin/statusline --subagent"
   }
 }
 ```
 
-`refreshInterval` (seconds) re-runs the command while idle so the reset and cache-expiry countdowns stay current; without it the line only updates on Claude Code events. `subagentStatusLine` is optional and renders the subagent rows.
+`refreshInterval` (seconds) re-runs the command while idle so the reset and cache-expiry countdowns stay current; without it the line only updates on Claude Code events.
 
 ## Antigravity Integration
 
@@ -131,14 +126,6 @@ Line 2 shows context window usage percentage, absolute tokens (input/total), out
 
 Antigravity mode uses the payload's `terminal_width` field for width-aware truncation when present, falling back to terminal detection or `COLUMNS`.
 
-**Subagent mode** (`--subagent`): reads the `subagentStatusLine` JSON (base fields plus `columns` and a `tasks[]` array) and writes one JSON line per row to override, e.g.:
-
-```
-{"id":"t1","content":"▸ explore-code · Explore · 15k"}
-```
-
-A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task name, label/type, and token count are rendered, truncated to the `columns` width. Tasks with no `id` are skipped (keeping their default row).
-
 ## Features
 
 - Git branch from `.git/HEAD`; dirty detection by spawning `git diff-index --quiet HEAD --`
@@ -146,9 +133,8 @@ A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task
 - Stash indicator from `.git/refs/stash`
 - K8s context/namespace from `$KUBECONFIG` or `~/.kube/config`
 - Claude Code: model, effort/thinking, folder (repo link), branch, worktree, fast mode, vim mode, PR badge, agent, session name, output style, signed-in account and plan, context bar, cost, lines, 5h/7d rate limits with reset countdowns, duration, prompt cache hit rate, expiry and misses
-- Width-aware truncation driven by `COLUMNS` (Claude/subagent modes) or `terminal_width` (Antigravity mode)
+- Width-aware truncation driven by `COLUMNS` (Claude mode) or `terminal_width` (Antigravity mode)
 - OSC 8 clickable links (repo, PR) when the terminal supports them
-- Subagent status line (`--subagent`): per-task JSON-lines row overrides
 - Virtualenv, SSH indicator, shell level (bash mode)
 - Bash mode abbreviates deep working directories: with four or more parent dirs, each parent collapses to its initial and the current dir is kept full
 - Respects `NO_COLOR` environment variable
@@ -159,7 +145,7 @@ A status glyph (`▸` running, `✓` done, `✗` failed, `·` pending), the task
 | Variable                   | Description                                                                            |
 | -------------------------- | -------------------------------------------------------------------------------------- |
 | `NO_COLOR`                 | Disable colored output (any value)                                                     |
-| `STATUSLINE_MODE`          | Default mode: `bash`, `claude`, `antigravity`, or `subagent`                           |
+| `STATUSLINE_MODE`          | Default mode: `bash`, `claude`, or `antigravity`                                       |
 | `COLUMNS`                  | Terminal width; drives width-aware truncation                                          |
 | `CLAUDE_CONFIG_DIR`        | `make install-claude` target and account lookup (default `~/.claude`)                  |
 | `STATUSLINE_ACCOUNT`       | `off` hides the account segment; `org` shows the plan without the email                |

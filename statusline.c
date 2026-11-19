@@ -28,14 +28,13 @@
 #define BUF_SIZE 65536
 #define PATH_MAX_LEN 4096
 // Claude payload counts ~125 jsmn tokens with every field present; 512 leaves
-// headroom for added_dirs[] and future fields. Subagent tasks[] is far larger.
+// headroom for added_dirs[] and future fields.
 #define MAX_TOKENS 512
-#define MAX_TOKENS_SUB 4096
 #define MAX_TOKENS_ANTIGRAVITY 4096
 #define GIT_REF_PREFIX "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
 
-enum { MODE_CLAUDE, MODE_BASH, MODE_SUBAGENT, MODE_ANTIGRAVITY };
+enum { MODE_CLAUDE, MODE_BASH, MODE_ANTIGRAVITY };
 enum { FMT_RAW, FMT_PS1 };
 
 static char g_input[BUF_SIZE];
@@ -1842,140 +1841,6 @@ static void pr_claude(void) {
   pr_claude_line2(g_input, toks, n);
 }
 
-// ==================== subagent mode ====================
-
-// JSON-string-escape `in` into `out`. Control bytes (including ANSI ESC) become
-// \uXXXX; the consumer renders the decoded ANSI/OSC sequences as-is.
-static void json_escape(char *out, size_t sz, const char *in) {
-  size_t p = 0;
-  for (; *in && p < sz - 1; in++) {
-    unsigned char ch = (unsigned char)*in;
-    char tmp[8];
-    const char *esc = NULL;
-    switch (ch) {
-    case '"':
-      esc = "\\\"";
-      break;
-    case '\\':
-      esc = "\\\\";
-      break;
-    case '\n':
-      esc = "\\n";
-      break;
-    case '\r':
-      esc = "\\r";
-      break;
-    case '\t':
-      esc = "\\t";
-      break;
-    default:
-      if (ch < 0x20) {
-        snprintf(tmp, sizeof(tmp), "\\u%04x", ch);
-        esc = tmp;
-      }
-      break;
-    }
-    if (esc) {
-      while (*esc && p < sz - 1)
-        out[p++] = *esc++;
-    } else {
-      out[p++] = (char)ch;
-    }
-  }
-  out[p] = '\0';
-}
-
-// Render one subagent row override: {"id":"<id>","content":"<body>"}.
-// The `status` enum is undocumented, so match tolerantly with a neutral
-// default.
-static void pr_subagent_row(const char *buf, jsmntok_t *t, int n, int el,
-                            int cols) {
-  char id[128];
-  if (!jp_str_from(buf, t, n, el, "id", id, sizeof(id)))
-    return; // no id -> keep the default row
-  char name[256] = "", status[64] = "", label[256] = "";
-  jp_str_from(buf, t, n, el, "name", name, sizeof(name));
-  jp_str_from(buf, t, n, el, "status", status, sizeof(status));
-  if (!jp_str_from(buf, t, n, el, "label", label, sizeof(label)))
-    jp_str_from(buf, t, n, el, "type", label, sizeof(label));
-  long tokc = jp_long_from(buf, t, n, el, "tokenCount", -1);
-
-  seg_t segs[8];
-  memset(segs, 0, sizeof(segs));
-  int c = 0;
-  seg_t *s;
-
-#define PUSH_SEG(prio_val, sep_val)                                            \
-  (c < 8 ? (s = &segs[c++], s->prio = (prio_val), s->sep = (sep_val), s) : NULL)
-
-  const char *col = DIM, *gl = "\xC2\xB7"; // U+00B7 pending/unknown
-  if (strstr(status, "complet") || strstr(status, "done") ||
-      strstr(status, "success") || strstr(status, "finish"))
-    col = GRN_F, gl = "\xE2\x9C\x93"; // U+2713 CHECK MARK
-  else if (strstr(status, "fail") || strstr(status, "error") ||
-           strstr(status, "cancel"))
-    col = RED_F, gl = "\xE2\x9C\x97"; // U+2717 BALLOT X
-  else if (strstr(status, "run") || strstr(status, "progress") ||
-           strstr(status, "active") || strstr(status, "work"))
-    col = CYN_F, gl = "\xE2\x96\xB8"; // U+25B8 BLACK RIGHT-POINTING TRIANGLE
-  if (PUSH_SEG(0, SEP_NONE)) {
-    seg_color(s, col);
-    seg_addglyph(s, gl, 1);
-    seg_color(s, RST);
-  }
-
-  if (name[0]) {
-    if (PUSH_SEG(0, SEP_SPACE)) {
-      seg_color(s, WHT_F);
-      seg_addf(s, "%s", name);
-      seg_color(s, RST);
-    }
-  }
-  if (label[0]) {
-    if (PUSH_SEG(2, SEP_SPACE)) {
-      seg_color(s, DIM);
-      seg_addf(s, "\xC2\xB7 %s", label);
-      seg_color(s, RST);
-    }
-  }
-  if (tokc >= 0) {
-    char tk[16];
-    fmt_tokens(tk, sizeof(tk), tokc);
-    if (PUSH_SEG(1, SEP_SPACE)) {
-      seg_color(s, DIM);
-      seg_addf(s, "\xC2\xB7 %s", tk);
-      seg_color(s, RST);
-    }
-  }
-
-  char body[4096], ebody[8192], eid[256];
-  seg_render(segs, c, cols, body, sizeof(body));
-  json_escape(ebody, sizeof(ebody), body);
-  json_escape(eid, sizeof(eid), id);
-  printf("{\"id\":\"%s\",\"content\":\"%s\"}\n", eid, ebody);
-#undef PUSH_SEG
-}
-
-static void pr_subagent(void) {
-  static jsmntok_t toks[MAX_TOKENS_SUB];
-  jsmn_parser p;
-  jsmn_init(&p);
-  int n = jsmn_parse(&p, g_input, strlen(g_input), toks, MAX_TOKENS_SUB);
-  if (n < 1)
-    return;
-  long cols = jp_long(g_input, toks, n, "columns", 0);
-  if (cols <= 0 || cols > 100000) // bound before the (int) cast below
-    cols = term_columns();
-  int arr = jp_find_array(g_input, toks, n, "tasks");
-  if (arr < 0)
-    return;
-  for (int el = jp_array_next(toks, n, arr, arr + 1); el >= 0;
-       el = jp_array_next(toks, n, arr, el + 1)) {
-    if (toks[el].type == JSMN_OBJECT)
-      pr_subagent_row(g_input, toks, n, el, (int)cols);
-  }
-}
-
 // ==================== argparse ====================
 
 static int parse_int(const char *s) {
@@ -1991,8 +1856,6 @@ static void usage(const char *prog) {
   fprintf(stderr, "  --bash         Bash prompt mode\n");
   fprintf(stderr, "  --claude       Claude Code mode (default)\n");
   fprintf(stderr, "  --antigravity  Antigravity (Gemini) mode\n");
-  fprintf(stderr,
-          "  --subagent     Subagent status line (JSON-lines output)\n");
   fprintf(stderr, "  --ps1          PS1-compatible escapes\n");
   fprintf(stderr, "  --exit-code=N  Last exit code\n");
   fprintf(stderr, "  --jobs=N       Background jobs\n");
@@ -2006,8 +1869,6 @@ static void parse_args(int argc, char **argv) {
   if (strcmp(prog, "bashline") == 0) {
     g_mode = MODE_BASH;
     g_fmt = FMT_PS1;
-  } else if (strcmp(prog, "subagentline") == 0) {
-    g_mode = MODE_SUBAGENT;
   } else if (strcmp(prog, "antigravityline") == 0) {
     g_mode = MODE_ANTIGRAVITY;
   }
@@ -2017,8 +1878,6 @@ static void parse_args(int argc, char **argv) {
       g_mode = MODE_BASH;
     else if (strcmp(em, "claude") == 0)
       g_mode = MODE_CLAUDE;
-    else if (strcmp(em, "subagent") == 0)
-      g_mode = MODE_SUBAGENT;
     else if (strcmp(em, "antigravity") == 0)
       g_mode = MODE_ANTIGRAVITY;
   }
@@ -2032,8 +1891,6 @@ static void parse_args(int argc, char **argv) {
       g_mode = MODE_CLAUDE;
     else if (strcmp(argv[i], "--antigravity") == 0)
       g_mode = MODE_ANTIGRAVITY;
-    else if (strcmp(argv[i], "--subagent") == 0)
-      g_mode = MODE_SUBAGENT;
     else if (strcmp(argv[i], "--ps1") == 0)
       g_fmt = FMT_PS1;
     else if (strncmp(argv[i], "--exit-code=", 12) == 0)
@@ -2063,8 +1920,6 @@ int main(int argc, char **argv) {
     pr_claude();
   } else if (g_mode == MODE_ANTIGRAVITY) {
     pr_antigravity();
-  } else if (g_mode == MODE_SUBAGENT) {
-    pr_subagent();
   } else {
     printf("\n");
     pr_venv();
