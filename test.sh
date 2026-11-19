@@ -478,9 +478,11 @@ else
   pass "claude mode suppresses empty string values"
 fi
 
-# Test 3: Bash mode output
+# Test 3: Bash mode output (the prompt char is '#' for root, '$' otherwise)
 OUT=$(./statusline --bash 2>&1)
-if echo "$OUT" | grep -q '\$'; then
+PROMPT_CHAR='\$'
+[ "$(id -u)" -eq 0 ] && PROMPT_CHAR='#'
+if echo "$OUT" | grep -q "$PROMPT_CHAR"; then
   pass "bash mode shows prompt"
 else
   fail "bash mode shows prompt"
