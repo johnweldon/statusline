@@ -21,11 +21,13 @@ statusline: statusline.c ## Build the statusline binary (default)
 install: statusline ## Install binary and symlinks to $(PREFIX)
 	install -m 755 statusline $(PREFIX)/statusline
 	ln -sf statusline $(PREFIX)/bashline
+	ln -sf statusline $(PREFIX)/zshline
 	ln -sf statusline $(PREFIX)/antigravityline
 
 install-local: statusline ## Install binary and symlinks to $(HOME)/.local/bin
 	install -m 755 statusline $(HOME)/.local/bin/statusline
 	ln -sf statusline $(HOME)/.local/bin/bashline
+	ln -sf statusline $(HOME)/.local/bin/zshline
 	ln -sf statusline $(HOME)/.local/bin/antigravityline
 
 install-claude: statusline ## Install binary to $(CLAUDE)
@@ -42,6 +44,6 @@ clean: ## Remove the built binary
 	rm -f statusline
 
 uninstall: ## Remove all installed binaries and symlinks
-	rm -f $(PREFIX)/statusline $(PREFIX)/bashline $(PREFIX)/subagentline $(PREFIX)/antigravityline $(CLAUDE)/statusline $(ANTIGRAVITY)/statusline
+	rm -f $(PREFIX)/statusline $(PREFIX)/bashline $(PREFIX)/zshline $(PREFIX)/subagentline $(PREFIX)/antigravityline $(CLAUDE)/statusline $(ANTIGRAVITY)/statusline
 
 .PHONY: help all install install-local install-claude install-antigravity test clean uninstall

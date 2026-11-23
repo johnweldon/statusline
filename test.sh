@@ -782,6 +782,187 @@ else
   fi
 fi
 
+# --- Zsh mode tests ---
+# Zsh mode shares bash mode's layout; only the escaping differs: colors wrap in
+# %{ %} and a literal '%' in dynamic text doubles. Each bash-mode case above is
+# mirrored by comparing the two modes' plain text, with the clock dropped so
+# two runs straddling a second still compare equal.
+
+no_clock() {
+  sed 's/[0-9][0-9]:[0-9][0-9]:[0-9][0-9]//'
+}
+same_as_bash() { # $1=dir  $2=HOME  $3=name
+  local b z
+  b=$(cd "$1" && HOME="$2" NO_COLOR=1 "$SL" --bash | no_clock)
+  z=$(cd "$1" && HOME="$2" NO_COLOR=1 "$SL" --zsh | no_clock)
+  if [ -n "$b" ] && [ "$b" = "$z" ]; then
+    pass "zsh $3 matches bash"
+  else
+    fail "zsh $3 (bash: $b, zsh: $z)"
+  fi
+}
+
+# Test 25: zsh prompt char is '#' for root, '$' otherwise
+OUT=$("$SL" --zsh 2>&1)
+if echo "$OUT" | grep -q "$PROMPT_CHAR"; then
+  pass "zsh mode shows prompt"
+else
+  fail "zsh mode shows prompt"
+fi
+
+# Test 26: every color is wrapped in %{ %}, and no SOH/STX appears
+STRIPPED=$(printf '%s' "$OUT" | sed 's/%{[^%]*%}//g')
+if printf '%s' "$OUT" | grep -q '%{'$'\033''\[' &&
+  ! printf '%s' "$STRIPPED" | grep -q $'\033' &&
+  ! printf '%s' "$OUT" | grep -q $'[\001\002]'; then
+  pass "zsh mode wraps colors in %{ %}"
+else
+  fail "zsh mode wraps colors in %{ %} (got: $(printf '%s' "$OUT" | od -c | head -5))"
+fi
+
+# Test 27: --ps1 does not switch zsh mode to SOH/STX
+OUT=$("$SL" --zsh --ps1 2>&1)
+if printf '%s' "$OUT" | grep -q '%{' && ! printf '%s' "$OUT" | grep -q $'[\001\002]'; then
+  pass "zsh mode ignores --ps1"
+else
+  fail "zsh mode ignores --ps1"
+fi
+
+# Test 28: exit code, invalid args, jobs
+OUT=$("$SL" --zsh --exit-code=42 2>&1)
+if echo "$OUT" | grep -q "42"; then
+  pass "zsh exit code displayed"
+else
+  fail "zsh exit code displayed"
+fi
+if OUT=$("$SL" --zsh --exit-code=abc --jobs=xyz 2>&1); then
+  pass "zsh invalid args handled gracefully"
+else
+  fail "zsh invalid args handled gracefully"
+fi
+OUT=$("$SL" --zsh --jobs=3 2>&1)
+if echo "$OUT" | grep -q "3 jobs"; then
+  pass "zsh jobs count displayed"
+else
+  fail "zsh jobs count displayed"
+fi
+
+# Test 29: zshline argv[0] alias and STATUSLINE_MODE=zsh select zsh mode
+TMPD=$(mktemp -d)
+ln -s "$SL" "$TMPD/zshline"
+if "$TMPD/zshline" | grep -q '%{' && STATUSLINE_MODE=zsh "$SL" < /dev/null | grep -q '%{'; then
+  pass "zshline alias and STATUSLINE_MODE=zsh"
+else
+  fail "zshline alias and STATUSLINE_MODE=zsh"
+fi
+rm -rf "$TMPD"
+
+# Test 30: git cases match bash mode
+for CASE in clean modified deleted mode staged stash detached; do
+  TMPD=$(setup_repo)
+  (
+    cd "$TMPD" || exit 1
+    case $CASE in
+      modified) echo "modified" > file.txt ;;
+      deleted) rm file.txt ;;
+      mode) chmod +x file.txt ;;
+      staged) echo "staged" > file.txt && git add file.txt ;;
+      stash) echo "stash me" > file.txt && git stash -q ;;
+      detached) git checkout -q "$(git rev-parse HEAD)" ;;
+    esac
+  )
+  same_as_bash "$TMPD" /nonexistent "git $CASE"
+  cleanup_repo "$TMPD"
+done
+TMPD=$(setup_repo)
+if git -C "$TMPD" worktree add -q ../wt-test-zsh -b wt-branch 2> /dev/null; then
+  echo "dirty" > "$(dirname "$TMPD")/wt-test-zsh/file.txt"
+  same_as_bash "$(dirname "$TMPD")/wt-test-zsh" /nonexistent "git worktree"
+  rm -rf "$(dirname "$TMPD")/wt-test-zsh"
+else
+  pass "zsh git worktree (skipped: git worktree not available)"
+fi
+cleanup_repo "$TMPD"
+
+# Test 31: cwd abbreviation cases match bash mode
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/build/src/github.com/johnweldon/statusline" "$TMPD/usr/local/share/man/man1/extra" \
+  "$TMPD/a/b/c/d" "$TMPD/.config/nvim/lua/plugins/foo" "$TMPD/weldon2/p/q/r/s/leaf" \
+  "$TMPD/..config/aa/bb/cc/dd/ee"
+same_as_bash "$TMPD/build/src/github.com/johnweldon/statusline" "$TMPD" "cwd deep HOME path"
+same_as_bash "$TMPD/usr/local/share/man/man1/extra" /nonexistent "cwd deep absolute path"
+same_as_bash "$TMPD/a/b/c/d" "$TMPD" "cwd at-threshold path"
+same_as_bash "$TMPD/.config/nvim/lua/plugins/foo" "$TMPD" "cwd hidden dir"
+same_as_bash "$TMPD" "$TMPD" "cwd HOME itself"
+same_as_bash "$TMPD/weldon2/p/q/r/s/leaf" "$TMPD/weldon" "cwd HOME prefix boundary"
+same_as_bash "$TMPD/..config/aa/bb/cc/dd/ee" "$TMPD" "cwd dotdot-name interior"
+if mkdir -p "$TMPD/éfoo/bar/baz/qux/leaf" 2> /dev/null && [ -d "$TMPD/éfoo/bar/baz/qux/leaf" ]; then
+  same_as_bash "$TMPD/éfoo/bar/baz/qux/leaf" "$TMPD" "cwd multibyte interior"
+else
+  pass "zsh cwd multibyte interior (skipped: cannot create multibyte dir)"
+fi
+rm -rf "$TMPD"
+
+# Test 32: '%' in the cwd doubles in zsh mode (shallow and abbreviated paths)
+# and stays single in bash mode
+run_cwd_zsh() { # $1=dir  $2=HOME
+  (
+    cd "$1" || exit 1
+    HOME="$2" NO_COLOR=1 "$SL" --zsh
+  ) | bash_cwd
+}
+TMPD=$(mktemp -d)
+TMPD=$(cd "$TMPD" && pwd -P)
+mkdir -p "$TMPD/50%off" "$TMPD/%a/b/c/d/le%af"
+TOK=$(run_cwd_zsh "$TMPD/50%off" "$TMPD")
+BTOK=$(run_cwd "$TMPD/50%off" "$TMPD")
+# shellcheck disable=SC2088 # literal ~ is the expected output
+if [ "$TOK" = "~/50%%off" ] && [ "$BTOK" = "~/50%off" ]; then
+  pass "zsh cwd escapes %"
+else
+  fail "zsh cwd escapes % (zsh: $TOK, bash: $BTOK)"
+fi
+TOK=$(run_cwd_zsh "$TMPD/%a/b/c/d/le%af" "$TMPD")
+# shellcheck disable=SC2088 # literal ~ is the expected output
+if [ "$TOK" = "~/%%/b/c/d/le%%af" ]; then
+  pass "zsh abbreviated cwd escapes %"
+else
+  fail "zsh abbreviated cwd escapes % (got: $TOK)"
+fi
+rm -rf "$TMPD"
+
+# Test 33: '%' in the git branch, virtualenv and k8s context/namespace doubles
+TMPD=$(setup_repo)
+git -C "$TMPD" checkout -q -b 'feat%x'
+KC="$TMPD/.kubeconfig"
+printf '%s\n' 'current-context: ctx%a' 'contexts:' '- name: ctx%a' '  context:' '    namespace: ns%b' > "$KC"
+OUT=$(cd "$TMPD" && VIRTUAL_ENV=/venvs/env%1 KUBECONFIG="$KC" NO_COLOR=1 "$SL" --zsh)
+if echo "$OUT" | grep -qF '(feat%%x)' && echo "$OUT" | grep -qF '[env%%1]' &&
+  echo "$OUT" | grep -qF 'ctx%%a|ns%%b'; then
+  pass "zsh branch, virtualenv and k8s escape %"
+else
+  fail "zsh branch, virtualenv and k8s escape % (got: $OUT)"
+fi
+
+# Test 34: zsh's own prompt expansion of zsh-mode output reproduces bash's raw
+# output, colors included, so the %{ %} and %% escapes are exactly right
+if command -v zsh > /dev/null 2>&1; then
+  mkdir -p "$TMPD/100%"
+  B=$(cd "$TMPD/100%" && VIRTUAL_ENV=/venvs/env%1 KUBECONFIG="$KC" "$SL" --bash --exit-code=1 --jobs=2 | no_clock)
+  Z=$(cd "$TMPD/100%" && VIRTUAL_ENV=/venvs/env%1 KUBECONFIG="$KC" "$SL" --zsh --exit-code=1 --jobs=2)
+  # shellcheck disable=SC2016 # $1 expands inside zsh
+  E=$(zsh -fc 'print -rn -- "${(%)1}"' _ "$Z" | no_clock)
+  if [ "$B" = "$E" ]; then
+    pass "zsh prompt expansion reproduces bash output"
+  else
+    fail "zsh prompt expansion (bash: $(printf '%s' "$B" | od -c | head -3) zsh: $(printf '%s' "$E" | od -c | head -3))"
+  fi
+else
+  pass "zsh prompt expansion (skipped: no zsh)"
+fi
+cleanup_repo "$TMPD"
+
 # Summary
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -1,5 +1,5 @@
-// statusline - Fast status line generator for bash and Claude Code
-// Usage: statusline [--bash|--claude] [--ps1] [--exit-code=N] [--jobs=N]
+// statusline - Fast status line generator for bash, zsh and Claude Code
+// Usage: statusline [--bash|--zsh|--claude] [--ps1] [--exit-code=N] [--jobs=N]
 #define _GNU_SOURCE
 #ifndef VERSION
 #define VERSION "unknown"
@@ -34,7 +34,7 @@
 #define GIT_REF_PREFIX "ref: refs/heads/"
 #define GIT_REF_PREFIX_LEN 16
 
-enum { MODE_CLAUDE, MODE_BASH, MODE_ANTIGRAVITY };
+enum { MODE_CLAUDE, MODE_BASH, MODE_ANTIGRAVITY, MODE_ZSH };
 enum { FMT_RAW, FMT_PS1 };
 
 static char g_input[BUF_SIZE];
@@ -67,14 +67,37 @@ static int g_shlvl = 0;
 #define WHT "\033[0;37m"
 #define BLD_WHT "\033[1;37m"
 
+// Shell prompt modes share one layout; zsh differs only in its escaping.
+static int shell_mode(void) {
+  return g_mode == MODE_BASH || g_mode == MODE_ZSH;
+}
+
 static void color(const char *c) {
   if (g_no_color)
     return;
-  if (g_fmt == FMT_PS1)
+  if (g_mode == MODE_ZSH)
+    printf("%%{%s%%}", c);
+  else if (g_fmt == FMT_PS1)
     printf("\001%s\002", c);
   else
     printf("%s", c);
 }
+
+// Write n bytes of dynamic text (paths, branch and context names). zsh
+// prompt-expands the result, so a literal '%' doubles there.
+static void put_text(const char *s, size_t n) {
+  if (g_mode != MODE_ZSH) {
+    fwrite(s, 1, n, stdout);
+    return;
+  }
+  for (size_t i = 0; i < n; i++) {
+    if (s[i] == '%')
+      putchar('%');
+    putchar(s[i]);
+  }
+}
+
+static void put_str(const char *s) { put_text(s, strlen(s)); }
 
 static int pathcat(char *out, size_t sz, const char *a, const char *b) {
   int n = snprintf(out, sz, "%s/%s", a, b);
@@ -215,7 +238,7 @@ static double jp_dbl(const char *buf, jsmntok_t *t, int n, const char *path,
 // ==================== stdin ====================
 
 static void read_stdin(void) {
-  if (g_mode == MODE_BASH || isatty(STDIN_FILENO))
+  if (shell_mode() || isatty(STDIN_FILENO))
     return;
   size_t n, total = 0;
   while ((n = fread(g_input + total, 1, sizeof(g_input) - total - 1, stdin)) >
@@ -232,20 +255,22 @@ static void read_stdin(void) {
 // ==================== bash-mode env blocks ====================
 
 static void pr_venv(void) {
-  if (g_mode != MODE_BASH)
+  if (!shell_mode())
     return;
   const char *v = getenv("VIRTUAL_ENV");
   if (!v || !*v)
     return;
   const char *n = strrchr(v, '/');
   color(BLD_WHT);
-  printf("[%s]", n ? n + 1 : v);
+  putchar('[');
+  put_str(n ? n + 1 : v);
+  putchar(']');
   color(RST);
   printf(" ");
 }
 
 static void pr_ssh(void) {
-  if (g_mode != MODE_BASH)
+  if (!shell_mode())
     return;
   if (!getenv("SSH_TTY"))
     return;
@@ -256,7 +281,7 @@ static void pr_ssh(void) {
 }
 
 static void pr_shlvl(void) {
-  if (g_mode != MODE_BASH || g_shlvl <= 1)
+  if (!shell_mode() || g_shlvl <= 1)
     return;
   color(BLD_CYN);
   printf("(%d)", g_shlvl);
@@ -391,7 +416,9 @@ static void pr_git(void) {
   if (!git_branch_name(gd, br, sizeof(br)))
     return;
   color(RED);
-  printf("(%s)", br);
+  putchar('(');
+  put_str(br);
+  putchar(')');
   color(RST);
   if (git_dirty(gd, wt)) {
     color(BLD_RED);
@@ -469,12 +496,12 @@ static void pr_k8s(void) {
   if (!*ctx)
     return;
   color(GRN);
-  printf("%s", ctx);
+  put_str(ctx);
   if (*ns) {
     color(WHT);
     printf("|");
     color(DIM_GRN);
-    printf("%s", ns);
+    put_str(ns);
   }
   color(RST);
   printf(" ");
@@ -492,9 +519,10 @@ static void pr_userhost(void) {
     *p = '\0';
   struct passwd *pw = getpwuid(getuid());
   color(CYN);
-  printf("%s", pw ? pw->pw_name : "?");
+  put_str(pw ? pw->pw_name : "?");
   color(BLD_CYN);
-  printf("@%s", hn);
+  putchar('@');
+  put_str(hn);
   color(RST);
 }
 
@@ -565,10 +593,11 @@ static void pr_cwd(void) {
   int interior = nseg > 0 ? nseg - 1 : 0;
   if (interior <= PATH_TRUNC_INTERIOR) {
     // Shallow path: byte-for-byte identical to the pre-truncation output.
-    if (root == '~')
-      printf("~%s", cwd + hl);
-    else
-      printf("%s", cwd);
+    if (root == '~') {
+      putchar('~');
+      put_str(cwd + hl);
+    } else
+      put_str(cwd);
   } else {
     // Abbreviate every interior dir to its initial codepoint(s); keep the
     // current dir in full. A '/' precedes each component (the home case is
@@ -588,7 +617,7 @@ static void pr_cwd(void) {
       size_t seglen = (size_t)(p - s);
       putchar('/');
       size_t keep = (i == nseg - 1) ? seglen : cwd_keep(s, seglen);
-      fwrite(s, 1, keep, stdout);
+      put_text(s, keep);
       i++;
     }
   }
@@ -610,7 +639,7 @@ static void pr_time(void) {
 }
 
 static void pr_prompt(void) {
-  if (g_mode != MODE_BASH)
+  if (!shell_mode())
     return;
   pr_time();
   printf(" ");
@@ -1854,6 +1883,7 @@ static int parse_int(const char *s) {
 static void usage(const char *prog) {
   fprintf(stderr, "Usage: %s [OPTIONS]\n", prog);
   fprintf(stderr, "  --bash         Bash prompt mode\n");
+  fprintf(stderr, "  --zsh          Zsh prompt mode\n");
   fprintf(stderr, "  --claude       Claude Code mode (default)\n");
   fprintf(stderr, "  --antigravity  Antigravity (Gemini) mode\n");
   fprintf(stderr, "  --ps1          PS1-compatible escapes\n");
@@ -1869,6 +1899,8 @@ static void parse_args(int argc, char **argv) {
   if (strcmp(prog, "bashline") == 0) {
     g_mode = MODE_BASH;
     g_fmt = FMT_PS1;
+  } else if (strcmp(prog, "zshline") == 0) {
+    g_mode = MODE_ZSH;
   } else if (strcmp(prog, "antigravityline") == 0) {
     g_mode = MODE_ANTIGRAVITY;
   }
@@ -1876,6 +1908,8 @@ static void parse_args(int argc, char **argv) {
   if (em) {
     if (strcmp(em, "bash") == 0)
       g_mode = MODE_BASH;
+    else if (strcmp(em, "zsh") == 0)
+      g_mode = MODE_ZSH;
     else if (strcmp(em, "claude") == 0)
       g_mode = MODE_CLAUDE;
     else if (strcmp(em, "antigravity") == 0)
@@ -1887,6 +1921,8 @@ static void parse_args(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--bash") == 0)
       g_mode = MODE_BASH;
+    else if (strcmp(argv[i], "--zsh") == 0)
+      g_mode = MODE_ZSH;
     else if (strcmp(argv[i], "--claude") == 0)
       g_mode = MODE_CLAUDE;
     else if (strcmp(argv[i], "--antigravity") == 0)

@@ -1,12 +1,12 @@
 # statusline
 
-Fast status line generator for bash prompts and Claude Code.
+Fast status line generator for bash and zsh prompts and Claude Code.
 
 ## Build
 
 ```bash
 make
-make install        # /usr/local/bin/statusline + bashline symlink
+make install        # /usr/local/bin/statusline + bashline/zshline symlinks
 make install-claude # ~/.claude/statusline
 make help           # list all targets
 ```
@@ -19,6 +19,12 @@ make help           # list all targets
 bashline --exit-code=$? --shlvl=$SHLVL --jobs=N
 ```
 
+**Zsh mode** (use `zshline` symlink for automatic `--zsh`):
+
+```zsh
+zshline --exit-code=$rc --shlvl=$SHLVL --jobs=${#jobstates}
+```
+
 **Claude mode** (reads Claude Code's statusline JSON from stdin):
 
 ```bash
@@ -29,6 +35,7 @@ echo '{"model":{"display_name":"Opus 4.7"}}' | statusline
 
 ```
 --bash         Bash prompt mode
+--zsh          Zsh prompt mode
 --claude       Claude Code mode (default)
 --antigravity  Antigravity (Gemini) mode
 --ps1          PS1-compatible escape sequences
@@ -51,6 +58,26 @@ fi
 ```
 
 The `--ps1` flag outputs raw control characters (SOH/STX) for correct cursor positioning when used in command substitution. The `\j` is a bash PS1 escape that expands to the job count.
+
+## Zsh Integration
+
+Add to `~/.zshrc`:
+
+```zsh
+if (( $+commands[zshline] )); then
+  _zshline_precmd() {
+    local rc=$?
+    PROMPT="$(zshline --exit-code=$rc --shlvl=$SHLVL --jobs=${#jobstates})"
+  }
+  autoload -Uz add-zsh-hook
+  add-zsh-hook precmd _zshline_precmd
+  setopt NO_PROMPT_SUBST
+fi
+```
+
+Zsh mode (`--zsh`, or the `zshline` symlink) prints the bash-mode layout with zsh escaping: colors are wrapped in `%{ %}` so zsh measures the prompt width correctly, and a literal `%` in the directory, git branch, virtualenv or k8s context is doubled to `%%`, since zsh prompt-expands `PROMPT`. `--ps1` has no effect in zsh mode. zsh has no `\j`, so the hook passes `${#jobstates}`.
+
+The hook runs `zshline` once per prompt and stores plain text in `PROMPT`; keep `PROMPT_SUBST` off, or a `$` or backquote in a directory or branch name would be expanded when the prompt is drawn.
 
 ## Claude Code Integration
 
@@ -89,7 +116,7 @@ The statusline binary auto-detects if the input JSON is from Antigravity (by che
 ## Display
 
 
-**Bash mode** (two lines):
+**Bash and zsh modes** (two lines):
 
 ```
 [venv] -ssh- user@host:~/path (branch) * context|ns [N jobs] (shlvl)
@@ -135,8 +162,8 @@ Antigravity mode uses the payload's `terminal_width` field for width-aware trunc
 - Claude Code: model, effort/thinking, folder (repo link), branch, worktree, fast mode, vim mode, PR badge, agent, session name, output style, signed-in account and plan, context bar, cost, lines, 5h/7d rate limits with reset countdowns, duration, prompt cache hit rate, expiry and misses
 - Width-aware truncation driven by `COLUMNS` (Claude mode) or `terminal_width` (Antigravity mode)
 - OSC 8 clickable links (repo, PR) when the terminal supports them
-- Virtualenv, SSH indicator, shell level (bash mode)
-- Bash mode abbreviates deep working directories: with four or more parent dirs, each parent collapses to its initial and the current dir is kept full
+- Virtualenv, SSH indicator, shell level (bash and zsh modes)
+- Bash and zsh modes abbreviate deep working directories: with four or more parent dirs, each parent collapses to its initial and the current dir is kept full
 - Respects `NO_COLOR` environment variable
 - JSON parsing via vendored `jsmn` (single-header, MIT, see `LICENSE-jsmn`)
 
@@ -145,7 +172,7 @@ Antigravity mode uses the payload's `terminal_width` field for width-aware trunc
 | Variable                   | Description                                                                            |
 | -------------------------- | -------------------------------------------------------------------------------------- |
 | `NO_COLOR`                 | Disable colored output (any value)                                                     |
-| `STATUSLINE_MODE`          | Default mode: `bash`, `claude`, or `antigravity`                                       |
+| `STATUSLINE_MODE`          | Default mode: `bash`, `zsh`, `claude`, or `antigravity`                                |
 | `COLUMNS`                  | Terminal width; drives width-aware truncation                                          |
 | `CLAUDE_CONFIG_DIR`        | `make install-claude` target and account lookup (default `~/.claude`)                  |
 | `STATUSLINE_ACCOUNT`       | `off` hides the account segment; `org` shows the plan without the email                |
@@ -153,8 +180,8 @@ Antigravity mode uses the payload's `terminal_width` field for width-aware trunc
 | `FORCE_HYPERLINK`          | Force OSC 8 links even if the terminal is unknown                                      |
 | `TERM_PROGRAM`             | Used to detect OSC 8 hyperlink support                                                 |
 | `KUBECONFIG`               | Kubernetes config file path                                                            |
-| `VIRTUAL_ENV`              | Python virtualenv path (bash mode)                                                     |
-| `SSH_TTY`                  | Detected for SSH indicator (bash mode)                                                 |
+| `VIRTUAL_ENV`              | Python virtualenv path (bash and zsh modes)                                            |
+| `SSH_TTY`                  | Detected for SSH indicator (bash and zsh modes)                                        |
 
 ## Platform Support
 
